@@ -77,6 +77,10 @@ def test_workflows_are_discoverable_but_not_activated(tmp_path: Path):
         "#!/bin/sh\n# Injects instructions.\n",
         encoding="utf-8",
     )
+    (hooks / "session-start-test.sh").write_text(
+        "#!/bin/sh\n# Tests only.\n",
+        encoding="utf-8",
+    )
     source = SourceConfig("repo", "workflows", tmp_path)
     docs = list(iter_workflows(source))
     assert {doc.metadata["workflow_type"] for doc in docs} == {

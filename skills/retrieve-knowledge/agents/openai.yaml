@@ -1,0 +1,4 @@
+interface:
+  display_name: "Retrieve Knowledge"
+  short_description: "Route knowledge, skills, history, and code"
+  default_prompt: "Use $retrieve-knowledge to load only the knowledge needed for this task."

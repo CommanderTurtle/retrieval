@@ -24,3 +24,10 @@ Use `hermes-retrieval sync`, `hermes-retrieval status`, or the seven MCP tools:
 `sync_sources`, and `retrieval_status`. Workflows are opt-in agent personas,
 commands, and hook definitions. Loading a hook returns its canonical source but
 never activates it.
+
+Install the small native routing skill after registering the MCP:
+
+```bash
+./install-hermes-skill.sh
+./install-hermes-skill.sh --profile librarian
+```

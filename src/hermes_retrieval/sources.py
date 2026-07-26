@@ -75,6 +75,15 @@ _WORKFLOW_SUFFIXES = {
 }
 
 
+def _is_workflow_file(path: Path) -> bool:
+    return (
+        path.is_file()
+        and path.suffix.lower() in _WORKFLOW_SUFFIXES
+        and not path.name.endswith(("-test.sh", "_test.sh"))
+        and not any(part in {".git", "node_modules", ".venv"} for part in path.parts)
+    )
+
+
 def _workflow_id(source: SourceConfig, path: Path) -> str:
     relative = path.relative_to(source.path).as_posix()
     return f"{source.name}:{relative}"
@@ -106,9 +115,7 @@ def iter_workflows(source: SourceConfig) -> Iterable[Document]:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.suffix.lower() not in _WORKFLOW_SUFFIXES:
-                continue
-            if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
+            if not _is_workflow_file(path):
                 continue
             path = _safe_resolve(path, source.path)
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -330,9 +337,7 @@ def workflow_catalog(sources: list[SourceConfig]) -> dict[str, tuple[SourceConfi
             if not root.is_dir():
                 continue
             for path in root.rglob("*"):
-                if not path.is_file() or path.suffix.lower() not in _WORKFLOW_SUFFIXES:
-                    continue
-                if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
+                if not _is_workflow_file(path):
                     continue
                 safe_path = _safe_resolve(path, source.path)
                 catalog[_workflow_id(source, safe_path)] = (
