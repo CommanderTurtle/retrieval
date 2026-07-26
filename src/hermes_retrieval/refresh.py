@@ -4,6 +4,7 @@ from collections.abc import Iterable
 import ctypes
 from datetime import datetime, timezone
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -65,6 +66,62 @@ _INOTIFY_EVENT = struct.Struct("iIII")
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def watcher_state_path(settings: Any) -> Path:
+    return Path(f"{settings.sync_lock_path}.watch.state.json")
+
+
+def external_watcher_snapshot(settings: Any) -> dict[str, Any] | None:
+    """Read the leader watcher's cross-process heartbeat, if it is current."""
+
+    path = watcher_state_path(settings)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        updated_at_epoch = float(payload["updated_at_epoch"])
+        pid = int(payload["pid"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    max_age = max(
+        10.0,
+        float(settings.watch_poll_seconds) * 2.0
+        + float(settings.watch_debounce_ms) / 1000.0,
+    )
+    age = max(0.0, time.time() - updated_at_epoch)
+    process_alive = True
+    try:
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        process_alive = False
+    snapshot = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"updated_at_epoch"}
+    }
+    snapshot.update(
+        {
+            "external": True,
+            "heartbeat_age_seconds": round(age, 3),
+            "state_file": str(path),
+            "healthy": bool(
+                payload.get("healthy")
+                and payload.get("leader")
+                and process_alive
+                and age <= max_age
+            ),
+        }
+    )
+    if not snapshot["healthy"]:
+        snapshot["last_error"] = (
+            str(snapshot.get("last_error") or "")
+            or "External watcher heartbeat is stale or its process exited."
+        )
+    return snapshot
 
 
 def _hash_file(hasher: Any, logical_path: str, path: Path) -> None:
@@ -473,6 +530,7 @@ class SourceRefreshWatcher:
             "lock_contentions": 0,
             "leader": False,
         }
+        self._last_state_write = 0.0
 
     def start(self) -> None:
         if not self.settings.watch_enabled:
@@ -493,6 +551,7 @@ class SourceRefreshWatcher:
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=3)
+        self._remove_published_state()
 
     def snapshot(self) -> dict[str, Any]:
         with self._mutex:
@@ -505,6 +564,48 @@ class SourceRefreshWatcher:
                 "writer_lock": str(self.settings.sync_lock_path),
                 "watcher_lock": f"{self.settings.sync_lock_path}.watch",
             }
+
+    def _publish_state(self, *, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._last_state_write < 1.0:
+            return
+        snapshot = self.snapshot()
+        if not snapshot.get("leader"):
+            return
+        path = watcher_state_path(self.settings)
+        payload = {
+            **snapshot,
+            "pid": os.getpid(),
+            "heartbeat_at": _utc_now(),
+            "updated_at_epoch": now,
+        }
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            logger.warning("Could not publish Retrieval watcher heartbeat: %s", exc)
+            self._last_state_write = now
+            return
+        self._last_state_write = now
+
+    def _remove_published_state(self) -> None:
+        path = watcher_state_path(self.settings)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if int(payload.get("pid", -1)) == os.getpid():
+                path.unlink(missing_ok=True)
+        except (OSError, TypeError, ValueError):
+            return
 
     def _queue(self, names: Iterable[str], *, event: bool) -> None:
         names = set(names)
@@ -600,6 +701,7 @@ class SourceRefreshWatcher:
             self._state["backend"] = monitor.name
             self._state["healthy"] = True
             self._state["leader"] = True
+        self._publish_state(force=True)
         self._queue((source.name for source in sources), event=False)
         try:
             while not self._stop.is_set():
@@ -643,6 +745,7 @@ class SourceRefreshWatcher:
                     >= self.settings.watch_debounce_ms / 1000
                 ):
                     self._reconcile()
+                self._publish_state()
         except Exception as exc:
             logger.exception("Retrieval source watcher stopped")
             with self._mutex:
@@ -651,7 +754,9 @@ class SourceRefreshWatcher:
         finally:
             monitor.close()
             with self._mutex:
+                self._state["healthy"] = False
                 self._state["leader"] = False
+            self._remove_published_state()
 
     def _run(self) -> None:
         watcher_lock_path = Path(f"{self.settings.sync_lock_path}.watch")

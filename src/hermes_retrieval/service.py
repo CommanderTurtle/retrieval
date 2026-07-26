@@ -10,7 +10,11 @@ from .archive import ArchiveStore
 from .config import Settings
 from .index import RetrievalIndex
 from .models import SourceConfig
-from .refresh import SourceRefreshWatcher, source_fingerprint
+from .refresh import (
+    SourceRefreshWatcher,
+    external_watcher_snapshot,
+    source_fingerprint,
+)
 from .sources import (
     iter_documents,
     skill_bundle_files,
@@ -67,7 +71,8 @@ class RetrievalService:
         watcher = (
             self._watcher.snapshot()
             if self._watcher is not None
-            else {
+            else external_watcher_snapshot(self.settings)
+            or {
                 "enabled": self.settings.watch_enabled,
                 "backend": "not-started",
                 "healthy": False,
