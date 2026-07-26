@@ -102,17 +102,21 @@ class RetrievalService:
         rows = []
         seen: set[str] = set()
         seen_paths: set[str] = set()
+        seen_names: set[str] = set()
         for hit in hits:
             skill_id = str(hit.metadata.get("skill_id") or "")
             canonical_path = str(Path(hit.locator).resolve(strict=False))
+            normalized_name = hit.title.strip().casefold()
             if (
                 not skill_id
                 or skill_id in seen
                 or canonical_path in seen_paths
+                or normalized_name in seen_names
             ):
                 continue
             seen.add(skill_id)
             seen_paths.add(canonical_path)
+            seen_names.add(normalized_name)
             rows.append(
                 {
                     "skill_id": skill_id,
