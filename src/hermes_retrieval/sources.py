@@ -36,6 +36,9 @@ def iter_skills(source: SourceConfig) -> Iterable[Document]:
             continue
         logical_path = path.absolute()
         canonical_path = path.resolve()
+        if not canonical_path.is_file():
+            logger.warning("skipping broken skill link: %s", logical_path)
+            continue
         text = canonical_path.read_text(encoding="utf-8", errors="replace")
         meta = frontmatter(text)
         skill_id = _skill_id(source, logical_path)
@@ -327,7 +330,10 @@ def skill_catalog(sources: list[SourceConfig]) -> dict[str, tuple[SourceConfig, 
             if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
                 continue
             logical_path = path.absolute()
-            catalog[_skill_id(source, logical_path)] = (source, path.resolve())
+            canonical_path = path.resolve()
+            if not canonical_path.is_file():
+                continue
+            catalog[_skill_id(source, logical_path)] = (source, canonical_path)
     return catalog
 
 
