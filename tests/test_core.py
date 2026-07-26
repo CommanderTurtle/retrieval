@@ -1,10 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from hermes_retrieval.chunking import chunk_text, frontmatter, stable_id
 from hermes_retrieval.models import SourceConfig
 from hermes_retrieval.sources import (
     iter_skills,
     iter_workflows,
+    skill_catalog,
     skill_bundle_files,
     workflow_catalog,
 )
@@ -38,6 +41,30 @@ def test_skill_source_uses_explicit_root(tmp_path: Path):
     assert docs[0].metadata["skill_id"] == "repo:alpha"
     assert docs[0].metadata["description"] == "Finds alpha."
     assert docs[0].record_id == stable_id("skills", "repo", "alpha/SKILL.md", 0)
+
+
+def test_skill_source_follows_linked_skill_directory(tmp_path: Path):
+    skill_dir = tmp_path / "repository" / "skills" / "sandwich-runtime"
+    skill_dir.mkdir(parents=True)
+    skill = skill_dir / "SKILL.md"
+    skill.write_text(
+        "---\nname: sandwich-runtime\ndescription: Uses Bun.\n---\n# Sandwich",
+        encoding="utf-8",
+    )
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    linked = installed / "sandwich-runtime"
+    try:
+        linked.symlink_to(skill_dir, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks require an unavailable host privilege")
+    source = SourceConfig("hermes-skills", "skills", installed)
+
+    docs = list(iter_skills(source))
+    assert docs
+    assert docs[0].metadata["skill_id"] == "hermes-skills:sandwich-runtime"
+    assert docs[0].locator == str(skill.resolve())
+    assert skill_catalog([source])["hermes-skills:sandwich-runtime"][1] == skill.resolve()
 
 
 def test_skill_bundle_follows_relative_docs_and_lists_resources(tmp_path: Path):

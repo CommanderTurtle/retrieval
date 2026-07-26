@@ -30,10 +30,36 @@ def _skill_id(source: SourceConfig, path: Path) -> str:
     return f"{source.name}:{suffix}"
 
 
-def iter_skills(source: SourceConfig) -> Iterable[Document]:
-    for path in sorted(source.path.rglob("SKILL.md")):
-        if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
+def _iter_skill_paths(root: Path) -> Iterable[Path]:
+    """Yield logical skill files, including explicitly linked skill directories.
+
+    ``Path.rglob`` includes a symlinked ``SKILL.md`` file but does not descend
+    into a symlinked skill directory. Hermes and several native integrations
+    install skills using the latter form. Follow only a linked directory whose
+    own top level contains ``SKILL.md``; never recursively walk an arbitrary
+    external tree.
+    """
+    selected = {
+        path.absolute()
+        for path in root.rglob("SKILL.md")
+        if not any(part in {".git", "node_modules", ".venv"} for part in path.parts)
+    }
+    for directory in root.rglob("*"):
+        if not directory.is_symlink():
             continue
+        logical_path = (directory / "SKILL.md").absolute()
+        if any(
+            part in {".git", "node_modules", ".venv"}
+            for part in logical_path.parts
+        ):
+            continue
+        if logical_path.resolve().is_file():
+            selected.add(logical_path)
+    yield from sorted(selected)
+
+
+def iter_skills(source: SourceConfig) -> Iterable[Document]:
+    for path in _iter_skill_paths(source.path):
         logical_path = path.absolute()
         canonical_path = path.resolve()
         if not canonical_path.is_file():
@@ -326,9 +352,7 @@ def skill_catalog(sources: list[SourceConfig]) -> dict[str, tuple[SourceConfig, 
     for source in sources:
         if not source.enabled or source.kind != "skills" or not source.path.is_dir():
             continue
-        for path in source.path.rglob("SKILL.md"):
-            if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
-                continue
+        for path in _iter_skill_paths(source.path):
             logical_path = path.absolute()
             canonical_path = path.resolve()
             if not canonical_path.is_file():
