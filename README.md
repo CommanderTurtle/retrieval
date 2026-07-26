@@ -117,4 +117,4 @@ uv build
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE).
+AGPLv3.0 - See [`LICENSE`](LICENSE).
