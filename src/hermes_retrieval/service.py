@@ -5,7 +5,7 @@ from typing import Any
 from .config import Settings
 from .index import RetrievalIndex
 from .models import SourceConfig
-from .sources import skill_catalog
+from .sources import skill_bundle_files, skill_catalog
 
 
 class RetrievalService:
@@ -111,24 +111,44 @@ class RetrievalService:
         total = 0
         for skill_id in requested:
             source, path = catalog[skill_id]
-            content = path.read_text(encoding="utf-8", errors="replace")
+            bundle_paths, resources = skill_bundle_files(source, path)
+            files = []
+            skill_total = 0
             truncated = False
-            if len(content) > self.settings.max_skill_chars:
-                content = content[: self.settings.max_skill_chars]
-                truncated = True
-            remaining = self.settings.max_total_skill_chars - total
-            if remaining <= 0:
-                break
-            if len(content) > remaining:
-                content = content[:remaining]
-                truncated = True
-            total += len(content)
+            for bundle_path in bundle_paths:
+                content = bundle_path.read_text(encoding="utf-8", errors="replace")
+                per_skill_remaining = self.settings.max_skill_chars - skill_total
+                global_remaining = self.settings.max_total_skill_chars - total
+                remaining = min(per_skill_remaining, global_remaining)
+                if remaining <= 0:
+                    truncated = True
+                    break
+                if len(content) > remaining:
+                    content = content[:remaining]
+                    truncated = True
+                skill_total += len(content)
+                total += len(content)
+                try:
+                    relative_path = bundle_path.relative_to(path.parent).as_posix()
+                except ValueError:
+                    relative_path = bundle_path.relative_to(source.path).as_posix()
+                files.append(
+                    {
+                        "path": str(bundle_path),
+                        "relative_path": relative_path,
+                        "content": content,
+                    }
+                )
+                if truncated:
+                    break
             loaded.append(
                 {
                     "skill_id": skill_id,
                     "repository": source.name,
                     "path": str(path),
-                    "content": content,
+                    "files": files,
+                    "resources": resources,
+                    "chars": skill_total,
                     "truncated": truncated,
                 }
             )
@@ -165,4 +185,3 @@ class RetrievalService:
                 }
             )
         return {"query": query, "matches": rows}
-

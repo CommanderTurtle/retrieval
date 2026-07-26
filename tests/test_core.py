@@ -2,7 +2,7 @@ from pathlib import Path
 
 from hermes_retrieval.chunking import chunk_text, frontmatter, stable_id
 from hermes_retrieval.models import SourceConfig
-from hermes_retrieval.sources import iter_skills
+from hermes_retrieval.sources import iter_skills, skill_bundle_files
 
 
 def test_chunking_is_stable_and_bounded():
@@ -34,3 +34,20 @@ def test_skill_source_uses_explicit_root(tmp_path: Path):
     assert docs[0].metadata["description"] == "Finds alpha."
     assert docs[0].record_id == stable_id("skills", "repo", "alpha/SKILL.md", 0)
 
+
+def test_skill_bundle_follows_relative_docs_and_lists_resources(tmp_path: Path):
+    skill_dir = tmp_path / "skills" / "alpha"
+    skill_dir.mkdir(parents=True)
+    skill = skill_dir / "SKILL.md"
+    skill.write_text("# Alpha\n\nRead [details](details.md).", encoding="utf-8")
+    details = skill_dir / "details.md"
+    details.write_text("# Details\n\nExact guidance.", encoding="utf-8")
+    (skill_dir / "script.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    source = SourceConfig("repo", "skills", tmp_path / "skills")
+    selected, resources = skill_bundle_files(source, skill)
+    assert selected == [skill.resolve(), details.resolve()]
+    assert {row["relative_path"] for row in resources} == {
+        "SKILL.md",
+        "details.md",
+        "script.sh",
+    }

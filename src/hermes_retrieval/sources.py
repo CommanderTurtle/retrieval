@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -223,3 +224,55 @@ def skill_catalog(sources: list[SourceConfig]) -> dict[str, tuple[SourceConfig, 
             catalog[_skill_id(source, safe_path)] = (source, safe_path)
     return catalog
 
+
+_MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_TEXT_RESOURCE_SUFFIXES = {
+    ".md", ".mdx", ".txt", ".rst", ".json", ".jsonl", ".toml", ".yaml", ".yml",
+}
+
+
+def skill_bundle_files(source: SourceConfig, skill_path: Path) -> tuple[list[Path], list[dict[str, int | str]]]:
+    """Return canonical instructions plus referenced text and a resource manifest.
+
+    Supporting material is followed only through relative Markdown links and
+    remains inside the cloned source repository. Executables and binary assets
+    are listed for the agent but are not injected into context.
+    """
+    skill_path = _safe_resolve(skill_path, source.path)
+    skill_root = skill_path.parent
+    queue = [skill_path]
+    selected: list[Path] = []
+    seen: set[Path] = set()
+    while queue:
+        current = queue.pop(0)
+        if current in seen or not current.is_file():
+            continue
+        seen.add(current)
+        selected.append(current)
+        if current.suffix.lower() not in _TEXT_RESOURCE_SUFFIXES:
+            continue
+        text = current.read_text(encoding="utf-8", errors="replace")
+        for raw_target in _MARKDOWN_LINK.findall(text):
+            target_text = raw_target.split("#", 1)[0].strip()
+            if not target_text or "://" in target_text or target_text.startswith(("/", "~")):
+                continue
+            target = (current.parent / target_text).resolve()
+            try:
+                target.relative_to(source.path.resolve())
+            except ValueError:
+                continue
+            if target.is_file() and target.suffix.lower() in _TEXT_RESOURCE_SUFFIXES:
+                queue.append(target)
+
+    resources = []
+    for path in sorted(skill_root.rglob("*")):
+        if not path.is_file() or any(part in {".git", "node_modules", ".venv"} for part in path.parts):
+            continue
+        resources.append(
+            {
+                "path": str(path),
+                "relative_path": path.relative_to(skill_root).as_posix(),
+                "bytes": path.stat().st_size,
+            }
+        )
+    return selected, resources

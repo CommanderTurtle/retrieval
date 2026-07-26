@@ -354,6 +354,7 @@ dependencies = [
     { name = "fastembed" },
     { name = "httpx" },
     { name = "mcp" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -367,6 +368,7 @@ requires-dist = [
     { name = "fastembed", specifier = ">=0.7,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mcp", specifier = ">=1.27,<2" },
+    { name = "pyyaml", specifier = ">=6,<7" },
 ]
 
 [package.metadata.requires-dev]

@@ -110,8 +110,8 @@ class Settings:
             hermes_command=os.getenv("HERMES_COMMAND", "hermes"),
             hermes_session_newer_than=os.getenv("HERMES_SESSION_NEWER_THAN", "3650d"),
             max_skills_per_load=max(1, _int_env("RETRIEVAL_MAX_SKILLS_PER_LOAD", 6)),
-            max_skill_chars=max(1000, _int_env("RETRIEVAL_MAX_SKILL_CHARS", 16000)),
-            max_total_skill_chars=max(2000, _int_env("RETRIEVAL_MAX_TOTAL_SKILL_CHARS", 50000)),
+            max_skill_chars=max(1000, _int_env("RETRIEVAL_MAX_SKILL_CHARS", 60000)),
+            max_total_skill_chars=max(2000, _int_env("RETRIEVAL_MAX_TOTAL_SKILL_CHARS", 120000)),
             max_recall_chars=max(1000, _int_env("RETRIEVAL_MAX_RECALL_CHARS", 8000)),
         )
 

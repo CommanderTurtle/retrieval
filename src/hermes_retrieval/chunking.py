@@ -4,6 +4,8 @@ import hashlib
 import re
 from typing import Iterator
 
+import yaml
+
 
 def stable_id(*parts: object) -> str:
     raw = "\n".join(str(part) for part in parts)
@@ -47,13 +49,14 @@ def frontmatter(text: str) -> dict[str, str]:
     end = text.find("\n---", 4)
     if end < 0:
         return {}
+    try:
+        payload = yaml.safe_load(text[4:end]) or {}
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
     result: dict[str, str] = {}
-    for line in text[4:end].splitlines():
-        if ":" not in line or line.startswith((" ", "\t")):
-            continue
-        key, value = line.split(":", 1)
-        value = value.strip().strip("\"'")
-        if value:
-            result[key.strip()] = value
+    for key, value in payload.items():
+        if isinstance(value, str) and value.strip():
+            result[str(key)] = value.strip()
     return result
-
