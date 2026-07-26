@@ -4,6 +4,19 @@ version = "0.1.0"
 description = "Source-aware semantic retrieval for Hermes"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
+license = "Apache-2.0"
+authors = [
+  { name = "CommanderTurtle" },
+]
+keywords = ["hermes", "mcp", "retrieval", "rag", "chromadb"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
 dependencies = [
   "chromadb-client>=1.0,<2",
   "fastembed>=0.7,<1",
@@ -14,6 +27,11 @@ dependencies = [
 
 [project.scripts]
 hermes-retrieval = "hermes_retrieval.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/CommanderTurtle/retrieval"
+Repository = "https://github.com/CommanderTurtle/retrieval.git"
+Issues = "https://github.com/CommanderTurtle/retrieval/issues"
 
 [dependency-groups]
 dev = [
