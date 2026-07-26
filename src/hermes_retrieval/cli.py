@@ -5,7 +5,9 @@ import json
 import logging
 import sys
 
+from .config import Settings
 from .service import RetrievalService
+from .skill_admin import SkillAdmin, SkillAdminError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,8 +38,80 @@ def _parser() -> argparse.ArgumentParser:
     recall.add_argument("--limit", type=int, default=8)
     recall.add_argument("--before", type=int, default=2)
     recall.add_argument("--after", type=int, default=3)
+    skills = sub.add_parser("skills")
+    skill_commands = skills.add_subparsers(dest="skills_command", required=True)
+    skill_list = skill_commands.add_parser("list")
+    skill_list.add_argument("--json", action="store_true", dest="as_json")
+    skill_inspect = skill_commands.add_parser("inspect")
+    skill_inspect.add_argument("skill_id")
+    skill_edit = skill_commands.add_parser("edit")
+    skill_edit.add_argument("skill_id")
+    skill_archive = skill_commands.add_parser("archive")
+    skill_archive.add_argument("skill_id")
+    skill_restore = skill_commands.add_parser("restore")
+    skill_restore.add_argument("skill_id")
     sub.add_parser("serve")
     return parser
+
+
+def _run_skills(args: argparse.Namespace) -> None:
+    try:
+        settings = Settings.load()
+        admin = SkillAdmin(settings.sources(), settings.skill_archive_root)
+        if args.skills_command == "list":
+            rows = admin.list()
+            if args.as_json:
+                print(json.dumps(rows, indent=2, sort_keys=True))
+                return
+            if not rows:
+                print("No configured skills were found.")
+                return
+            print(f"{'STATE':<10} {'MODIFIED (UTC)':<25} {'NAME':<28} EXACT ID")
+            for row in rows:
+                modified = str(row.get("modified_at") or "-")
+                if modified != "-":
+                    modified = modified.replace("+00:00", "Z")
+                print(
+                    f"{str(row['state']):<10} "
+                    f"{modified[:24]:<25} "
+                    f"{str(row.get('name') or '-')[:27]:<28} "
+                    f"{row['skill_id']}"
+                )
+            return
+        if args.skills_command == "inspect":
+            row = admin.inspect(args.skill_id)
+            content = str(row.pop("content"))
+            print(json.dumps(row, indent=2, sort_keys=True))
+            print("\n--- SKILL.md ---\n")
+            print(content)
+            return
+        if args.skills_command == "edit":
+            return_code = admin.edit(args.skill_id)
+            if return_code:
+                raise SystemExit(return_code)
+            return
+        if args.skills_command == "archive":
+            print(
+                json.dumps(
+                    admin.archive(args.skill_id),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return
+        if args.skills_command == "restore":
+            print(
+                json.dumps(
+                    admin.restore(args.skill_id),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return
+        raise AssertionError(args.skills_command)
+    except (SkillAdminError, OSError, ValueError) as exc:
+        print(f"hermes-retrieval: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 def main() -> None:
@@ -51,6 +125,9 @@ def main() -> None:
     if args.command == "serve":
         from .server import main as serve
         serve()
+        return
+    if args.command == "skills":
+        _run_skills(args)
         return
     service = RetrievalService()
     if args.command == "status":

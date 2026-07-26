@@ -36,6 +36,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 def _diogenes_endpoint() -> dict[str, str]:
     explicit = os.getenv("DIOGENES_EMBEDDING_ENDPOINT_FILE", "").strip()
     root = os.getenv("DIOGENES_ROOT", "").strip()
@@ -78,6 +85,12 @@ class Settings:
     fastembed_cache: Path
     hermes_command: str
     hermes_session_newer_than: str
+    watch_enabled: bool
+    watch_debounce_ms: int
+    watch_poll_seconds: float
+    sync_lock_path: Path
+    sync_lock_timeout: float
+    skill_archive_root: Path
     max_skills_per_load: int
     max_skill_chars: int
     max_total_skill_chars: int
@@ -88,22 +101,33 @@ class Settings:
         project_root = (root or Path(__file__).resolve().parents[2]).resolve()
         _load_dotenv(project_root / ".env")
         diogenes = _diogenes_endpoint()
+        archive_db = Path(
+            os.path.expandvars(
+                os.path.expanduser(
+                    os.getenv(
+                        "RETRIEVAL_ARCHIVE_DB",
+                        "~/.local/share/hermes-retrieval/archive.sqlite3",
+                    )
+                )
+            )
+        ).resolve()
+        sync_lock_path = Path(
+            os.path.expandvars(
+                os.path.expanduser(
+                    os.getenv(
+                        "RETRIEVAL_SYNC_LOCK",
+                        f"{archive_db}.sync.lock",
+                    )
+                )
+            )
+        ).resolve()
         return cls(
             root=project_root,
             sources_file=project_root / "sources.toml",
             chroma_host=os.getenv("RETRIEVAL_CHROMA_HOST", "127.0.0.1"),
             chroma_port=_int_env("RETRIEVAL_CHROMA_PORT", 8100),
             chroma_ssl=_bool_env("RETRIEVAL_CHROMA_SSL"),
-            archive_db=Path(
-                os.path.expandvars(
-                    os.path.expanduser(
-                        os.getenv(
-                            "RETRIEVAL_ARCHIVE_DB",
-                            "~/.local/share/hermes-retrieval/archive.sqlite3",
-                        )
-                    )
-                )
-            ).resolve(),
+            archive_db=archive_db,
             embedding_url=os.getenv("EMBEDDING_URL", "").strip() or diogenes.get("url", ""),
             embedding_model=os.getenv("EMBEDDING_MODEL", "").strip() or diogenes.get("model", ""),
             embedding_api_key=os.getenv("EMBEDDING_API_KEY", "").strip() or diogenes.get("api_key", ""),
@@ -120,6 +144,30 @@ class Settings:
             ).resolve(),
             hermes_command=os.getenv("HERMES_COMMAND", "hermes"),
             hermes_session_newer_than=os.getenv("HERMES_SESSION_NEWER_THAN", "3650d"),
+            watch_enabled=_bool_env("RETRIEVAL_WATCH_ENABLED", True),
+            watch_debounce_ms=max(
+                250,
+                min(30_000, _int_env("RETRIEVAL_WATCH_DEBOUNCE_MS", 1500)),
+            ),
+            watch_poll_seconds=max(
+                2.0,
+                _float_env("RETRIEVAL_WATCH_POLL_SECONDS", 15.0),
+            ),
+            sync_lock_path=sync_lock_path,
+            sync_lock_timeout=max(
+                0.0,
+                _float_env("RETRIEVAL_SYNC_LOCK_TIMEOUT", 30.0),
+            ),
+            skill_archive_root=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_SKILL_ARCHIVE",
+                            str(archive_db.parent / "skill-archive"),
+                        )
+                    )
+                )
+            ).absolute(),
             max_skills_per_load=max(1, _int_env("RETRIEVAL_MAX_SKILLS_PER_LOAD", 6)),
             max_skill_chars=max(1000, _int_env("RETRIEVAL_MAX_SKILL_CHARS", 60000)),
             max_total_skill_chars=max(2000, _int_env("RETRIEVAL_MAX_TOTAL_SKILL_CHARS", 120000)),
@@ -139,12 +187,17 @@ class Settings:
             kind = str(row["kind"]).strip()
             if not name or name in seen:
                 raise ValueError(f"source names must be non-empty and unique: {name!r}")
+            # Older local catalogs included Librarian's OKF data. Keep those
+            # installations upgrade-safe while enforcing the ownership
+            # boundary: Librarian, not Retrieval, indexes and mutates it.
+            if kind == "librarian":
+                seen.add(name)
+                continue
             if kind not in {
                 "skills",
                 "workflows",
                 "context_mode",
                 "hermes_sessions",
-                "librarian",
             }:
                 raise ValueError(f"unsupported source kind {kind!r} for {name}")
             raw_path = os.path.expandvars(os.path.expanduser(str(row["path"])))
@@ -152,7 +205,11 @@ class Settings:
                 SourceConfig(
                     name=name,
                     kind=kind,
-                    path=Path(raw_path).resolve(),
+                    # Preserve the configured logical path. Resolving here
+                    # would erase evidence that a source root is a symlink,
+                    # preventing the exact-ID admin CLI from rejecting a
+                    # mutating operation through it.
+                    path=Path(raw_path).absolute(),
                     enabled=bool(row.get("enabled", True)),
                 )
             )

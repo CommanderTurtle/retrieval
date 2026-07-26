@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from typing import Any
+
+from filelock import FileLock, Timeout as FileLockTimeout
 
 from .archive import ArchiveStore
 from .config import Settings
 from .index import RetrievalIndex
 from .models import SourceConfig
+from .refresh import SourceRefreshWatcher, source_fingerprint
 from .sources import (
     iter_documents,
     skill_bundle_files,
@@ -21,6 +25,17 @@ class RetrievalService:
         self.sources = self.settings.sources()
         self.archive = ArchiveStore(self.settings.archive_db)
         self.index = RetrievalIndex(self.settings)
+        self._write_mutex = threading.RLock()
+        self._watcher: SourceRefreshWatcher | None = None
+
+    def start_watcher(self) -> None:
+        if self._watcher is None:
+            self._watcher = SourceRefreshWatcher(self)
+        self._watcher.start()
+
+    def stop_watcher(self) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
 
     def _selected(
         self,
@@ -48,6 +63,61 @@ class RetrievalService:
 
     def status(self) -> dict[str, Any]:
         result = self.index.status(self.sources)
+        checkpoints = self.archive.checkpoints()
+        watcher = (
+            self._watcher.snapshot()
+            if self._watcher is not None
+            else {
+                "enabled": self.settings.watch_enabled,
+                "backend": "not-started",
+                "healthy": False,
+                "pending_sources": [],
+                "stale_sources": [],
+                "writer_lock": str(self.settings.sync_lock_path),
+            }
+        )
+        pending = set(watcher.get("pending_sources") or [])
+        watcher_stale = set(watcher.get("stale_sources") or [])
+        by_name = {source.name: source for source in self.sources}
+        for row in result.get("sources", []):
+            source = by_name[str(row["name"])]
+            checkpoint = checkpoints.get(source.name)
+            reasons: list[str] = []
+            current_fingerprint = ""
+            fingerprint_error = ""
+            if row.get("available"):
+                try:
+                    current_fingerprint = source_fingerprint(source)
+                except Exception as exc:
+                    fingerprint_error = f"{type(exc).__name__}: {exc}"
+                    reasons.append("fingerprint_failed")
+            else:
+                reasons.append("source_unavailable")
+            if checkpoint is None:
+                reasons.append("checkpoint_missing")
+            else:
+                if (
+                    current_fingerprint
+                    and current_fingerprint
+                    != checkpoint.get("synced_fingerprint")
+                ):
+                    reasons.append("source_changed")
+                if checkpoint.get("last_error"):
+                    reasons.append("last_sync_failed")
+            health = self.index.source_health(source, checkpoint)
+            reasons.extend(health["reasons"])
+            if source.name in pending:
+                reasons.append("refresh_pending")
+            if source.name in watcher_stale:
+                reasons.append("watcher_marked_stale")
+            row["checkpoint"] = {
+                **(checkpoint or {}),
+                "current_fingerprint": current_fingerprint,
+                "fingerprint_error": fingerprint_error,
+            }
+            row["index_health"] = health
+            row["stale"] = bool(reasons)
+            row["stale_reasons"] = list(dict.fromkeys(reasons))
         result["archive"] = {
             "path": str(self.settings.archive_db),
             "sources": {
@@ -57,40 +127,135 @@ class RetrievalService:
                 }
                 for source in self.sources
             },
+            "checkpoints": checkpoints,
         }
+        result["watcher"] = watcher
         return result
 
-    def sync(self, names: list[str] | None = None) -> dict[str, Any]:
+    def sync(
+        self,
+        names: list[str] | None = None,
+        *,
+        reason: str = "manual",
+        only_if_stale: bool = False,
+        lock_timeout: float | None = None,
+    ) -> dict[str, Any]:
         selected = self._selected(names=names)
-        reports = []
-        for source in selected:
-            try:
-                current = list(iter_documents(source, self.settings))
-                archive_report = self.archive.sync(
-                    source,
-                    current,
-                    retain_history=source.kind in {"context_mode", "hermes_sessions"},
-                )
-                index_report = self.index.sync_documents(
-                    source,
-                    self.archive.documents_for_source(source.name),
-                )
-                index_report["archive"] = archive_report
-                reports.append(index_report)
-            except Exception as exc:
-                reports.append(
-                    {
-                        "source": source.name,
-                        "kind": source.kind,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
         unavailable = [
             source.name
             for source in self._selected(names=names, require_available=False)
             if not source.path.exists()
         ]
-        return {"synced": reports, "unavailable": unavailable}
+        self.settings.sync_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        timeout = (
+            self.settings.sync_lock_timeout
+            if lock_timeout is None
+            else max(0.0, lock_timeout)
+        )
+        lock = FileLock(str(self.settings.sync_lock_path))
+        try:
+            lock.acquire(timeout=timeout)
+        except FileLockTimeout:
+            return {
+                "reason": reason,
+                "synced": [],
+                "skipped": [],
+                "unavailable": unavailable,
+                "lock": {
+                    "path": str(self.settings.sync_lock_path),
+                    "acquired": False,
+                    "timeout": timeout,
+                },
+            }
+        reports = []
+        skipped = []
+        try:
+            with self._write_mutex:
+                for source in selected:
+                    fingerprint = ""
+                    try:
+                        fingerprint = source_fingerprint(source)
+                        checkpoint = self.archive.checkpoint(source.name)
+                        health = self.index.source_health(source, checkpoint)
+                        reasons = list(health["reasons"])
+                        if checkpoint is None:
+                            reasons.append("checkpoint_missing")
+                        elif (
+                            checkpoint.get("synced_fingerprint")
+                            != fingerprint
+                        ):
+                            reasons.append("source_changed")
+                        elif checkpoint.get("last_error"):
+                            reasons.append("last_sync_failed")
+                        if only_if_stale and not reasons:
+                            skipped.append(
+                                {
+                                    "source": source.name,
+                                    "kind": source.kind,
+                                    "fingerprint": fingerprint,
+                                    "reason": "current",
+                                }
+                            )
+                            continue
+                        current = list(iter_documents(source, self.settings))
+                        archive_report = self.archive.sync(
+                            source,
+                            current,
+                            retain_history=source.kind
+                            in {"context_mode", "hermes_sessions"},
+                        )
+                        archived = self.archive.documents_for_source(source.name)
+                        index_report = self.index.sync_documents(
+                            source,
+                            archived,
+                        )
+                        fingerprint_after = source_fingerprint(source)
+                        changed_during_sync = fingerprint_after != fingerprint
+                        self.archive.mark_sync_success(
+                            source,
+                            fingerprint=fingerprint,
+                            embedding_fingerprints=(
+                                self.index.embedding_fingerprints
+                            ),
+                            document_count=len(archived),
+                        )
+                        index_report["archive"] = archive_report
+                        index_report["fingerprint"] = fingerprint
+                        index_report["changed_during_sync"] = (
+                            changed_during_sync
+                        )
+                        reports.append(index_report)
+                    except Exception as exc:
+                        error = f"{type(exc).__name__}: {exc}"
+                        try:
+                            self.archive.mark_sync_error(
+                                source,
+                                fingerprint=fingerprint,
+                                error=error,
+                            )
+                        except Exception:
+                            pass
+                        reports.append(
+                            {
+                                "source": source.name,
+                                "kind": source.kind,
+                                "fingerprint": fingerprint,
+                                "error": error,
+                            }
+                        )
+        finally:
+            lock.release()
+        return {
+            "reason": reason,
+            "synced": reports,
+            "skipped": skipped,
+            "unavailable": unavailable,
+            "lock": {
+                "path": str(self.settings.sync_lock_path),
+                "acquired": True,
+                "timeout": timeout,
+            },
+        }
 
     def find_skills(self, query: str, limit: int = 8) -> dict[str, Any]:
         limit = max(1, min(limit, 20))
@@ -297,7 +462,7 @@ class RetrievalService:
         limit = max(1, min(limit, 20))
         selected = self._selected(
             names=sources,
-            kinds={"context_mode", "hermes_sessions", "librarian"},
+            kinds={"context_mode", "hermes_sessions"},
         )
         hits = self.index.search(query, selected, limit=limit)
         remaining = self.settings.max_recall_chars
@@ -325,7 +490,15 @@ class RetrievalService:
                         "excerpt": excerpt,
                         "role": str(item.metadata.get("role") or ""),
                         "tool_name": str(item.metadata.get("tool_name") or ""),
+                        "tool_call_id": str(
+                            item.metadata.get("tool_call_id") or ""
+                        ),
                         "timestamp": item.metadata.get("timestamp", ""),
+                        "profile": str(item.metadata.get("profile") or ""),
+                        "session_id": str(
+                            item.metadata.get("session_id") or ""
+                        ),
+                        "sequence": item.metadata.get("sequence"),
                         "message_position": item.metadata.get("message_position"),
                         "rowid": item.metadata.get("rowid"),
                     }

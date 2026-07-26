@@ -92,7 +92,12 @@ def retrieval_status() -> dict:
 
 
 def main() -> None:
-    mcp.run(transport="stdio")
+    service = _service()
+    service.start_watcher()
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        service.stop_watcher()
 
 
 if __name__ == "__main__":

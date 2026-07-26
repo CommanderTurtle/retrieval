@@ -35,6 +35,65 @@ class ArchiveStore:
                     ON documents(source_name, active);
                 CREATE INDEX IF NOT EXISTS documents_kind
                     ON documents(kind, source_name);
+                CREATE INDEX IF NOT EXISTS documents_hermes_timeline
+                    ON documents (
+                        source_name,
+                        json_extract(metadata_json, '$.session_id'),
+                        coalesce(
+                            json_extract(metadata_json, '$.profile'),
+                            'default'
+                        ),
+                        CAST(
+                            coalesce(
+                                json_extract(metadata_json, '$.sequence'),
+                                0
+                            ) AS INTEGER
+                        ),
+                        CAST(
+                            coalesce(
+                                json_extract(metadata_json, '$.chunk_index'),
+                                0
+                            ) AS INTEGER
+                        )
+                    )
+                    WHERE kind = 'hermes_sessions';
+                CREATE INDEX IF NOT EXISTS documents_context_timeline
+                    ON documents (
+                        source_name,
+                        json_extract(metadata_json, '$.database'),
+                        json_extract(metadata_json, '$.session_id'),
+                        CAST(
+                            coalesce(
+                                json_extract(metadata_json, '$.source_id'),
+                                0
+                            ) AS INTEGER
+                        ),
+                        CAST(
+                            coalesce(
+                                json_extract(metadata_json, '$.rowid'),
+                                0
+                            ) AS INTEGER
+                        ),
+                        CAST(
+                            coalesce(
+                                json_extract(metadata_json, '$.chunk_index'),
+                                0
+                            ) AS INTEGER
+                        )
+                    )
+                    WHERE kind = 'context_mode';
+                CREATE TABLE IF NOT EXISTS source_checkpoints (
+                    source_name TEXT PRIMARY KEY,
+                    source_kind TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    observed_fingerprint TEXT NOT NULL,
+                    synced_fingerprint TEXT NOT NULL,
+                    embedding_fingerprints_json TEXT NOT NULL,
+                    document_count INTEGER NOT NULL DEFAULT 0,
+                    last_observed_at TEXT NOT NULL,
+                    last_synced_at TEXT,
+                    last_error TEXT NOT NULL DEFAULT ''
+                );
                 """
             )
 
@@ -142,6 +201,156 @@ class ArchiveStore:
             ).fetchone()
         return int(total), int(active)
 
+    @staticmethod
+    def _checkpoint_row(row: sqlite3.Row | tuple | None) -> dict | None:
+        if not row:
+            return None
+        (
+            source_name,
+            source_kind,
+            source_path,
+            observed_fingerprint,
+            synced_fingerprint,
+            embedding_fingerprints_json,
+            document_count,
+            last_observed_at,
+            last_synced_at,
+            last_error,
+        ) = row
+        try:
+            embedding_fingerprints = json.loads(embedding_fingerprints_json)
+        except (TypeError, ValueError):
+            embedding_fingerprints = {}
+        if not isinstance(embedding_fingerprints, dict):
+            embedding_fingerprints = {}
+        return {
+            "source_name": str(source_name),
+            "source_kind": str(source_kind),
+            "source_path": str(source_path),
+            "observed_fingerprint": str(observed_fingerprint),
+            "synced_fingerprint": str(synced_fingerprint),
+            "embedding_fingerprints": {
+                str(key): str(value)
+                for key, value in embedding_fingerprints.items()
+            },
+            "document_count": int(document_count),
+            "last_observed_at": str(last_observed_at),
+            "last_synced_at": str(last_synced_at or ""),
+            "last_error": str(last_error or ""),
+        }
+
+    def checkpoint(self, source_name: str) -> dict | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT source_name, source_kind, source_path,
+                       observed_fingerprint, synced_fingerprint,
+                       embedding_fingerprints_json, document_count,
+                       last_observed_at, last_synced_at, last_error
+                  FROM source_checkpoints
+                 WHERE source_name = ?
+                """,
+                (source_name,),
+            ).fetchone()
+        return self._checkpoint_row(row)
+
+    def checkpoints(self) -> dict[str, dict]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT source_name, source_kind, source_path,
+                       observed_fingerprint, synced_fingerprint,
+                       embedding_fingerprints_json, document_count,
+                       last_observed_at, last_synced_at, last_error
+                  FROM source_checkpoints
+                 ORDER BY source_name
+                """
+            ).fetchall()
+        return {
+            checkpoint["source_name"]: checkpoint
+            for row in rows
+            if (checkpoint := self._checkpoint_row(row)) is not None
+        }
+
+    def mark_sync_success(
+        self,
+        source: SourceConfig,
+        *,
+        fingerprint: str,
+        embedding_fingerprints: dict[str, str],
+        document_count: int,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO source_checkpoints (
+                    source_name, source_kind, source_path,
+                    observed_fingerprint, synced_fingerprint,
+                    embedding_fingerprints_json, document_count,
+                    last_observed_at, last_synced_at, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                ON CONFLICT(source_name) DO UPDATE SET
+                    source_kind = excluded.source_kind,
+                    source_path = excluded.source_path,
+                    observed_fingerprint = excluded.observed_fingerprint,
+                    synced_fingerprint = excluded.synced_fingerprint,
+                    embedding_fingerprints_json =
+                        excluded.embedding_fingerprints_json,
+                    document_count = excluded.document_count,
+                    last_observed_at = excluded.last_observed_at,
+                    last_synced_at = excluded.last_synced_at,
+                    last_error = ''
+                """,
+                (
+                    source.name,
+                    source.kind,
+                    str(source.path),
+                    fingerprint,
+                    fingerprint,
+                    json.dumps(embedding_fingerprints, sort_keys=True),
+                    int(document_count),
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def mark_sync_error(
+        self,
+        source: SourceConfig,
+        *,
+        fingerprint: str,
+        error: str,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO source_checkpoints (
+                    source_name, source_kind, source_path,
+                    observed_fingerprint, synced_fingerprint,
+                    embedding_fingerprints_json, document_count,
+                    last_observed_at, last_synced_at, last_error
+                ) VALUES (?, ?, ?, ?, '', '{}', 0, ?, NULL, ?)
+                ON CONFLICT(source_name) DO UPDATE SET
+                    source_kind = excluded.source_kind,
+                    source_path = excluded.source_path,
+                    observed_fingerprint = excluded.observed_fingerprint,
+                    last_observed_at = excluded.last_observed_at,
+                    last_error = excluded.last_error
+                """,
+                (
+                    source.name,
+                    source.kind,
+                    str(source.path),
+                    fingerprint,
+                    now,
+                    error[:4000],
+                ),
+            )
+            connection.commit()
+
     def neighbors(self, record_id: str, before: int, after: int) -> list[Document]:
         with closing(self._connect()) as connection:
             row = connection.execute(
@@ -155,52 +364,140 @@ class ArchiveStore:
             if not row:
                 return []
             anchor = self._row_to_document(row)
-            rows = connection.execute(
-                """
-                SELECT record_id, source_name, kind, title, content, locator, metadata_json
-                  FROM documents
-                 WHERE source_name = ? AND kind = ?
-                """,
-                (anchor.source_name, anchor.kind),
-            ).fetchall()
-        candidates = [self._row_to_document(item) for item in rows]
-        anchor_meta = anchor.metadata
-        if anchor.kind == "hermes_sessions":
-            session_id = str(anchor_meta.get("session_id") or "")
-            candidates = [
-                item
-                for item in candidates
-                if str(item.metadata.get("session_id") or "") == session_id
-            ]
-            key = lambda item: (
-                int(item.metadata.get("message_position") or 0),
-                int(item.metadata.get("chunk_index") or 0),
-            )
-        elif anchor.kind == "context_mode":
-            session_id = str(anchor_meta.get("session_id") or "")
-            if session_id:
-                candidates = [
-                    item
-                    for item in candidates
-                    if str(item.metadata.get("session_id") or "") == session_id
-                ]
-            else:
+            anchor_meta = anchor.metadata
+            if anchor.kind == "hermes_sessions":
+                rows = connection.execute(
+                    """
+                    SELECT record_id, source_name, kind, title, content,
+                           locator, metadata_json
+                      FROM documents
+                     WHERE source_name = ?
+                       AND kind = 'hermes_sessions'
+                       AND json_extract(metadata_json, '$.session_id') = ?
+                       AND coalesce(
+                               json_extract(metadata_json, '$.profile'),
+                               'default'
+                           ) = ?
+                  ORDER BY CAST(
+                               coalesce(
+                                   json_extract(metadata_json, '$.sequence'),
+                                   0
+                               ) AS INTEGER
+                           ),
+                           CAST(
+                               coalesce(
+                                   json_extract(
+                                       metadata_json,
+                                       '$.message_position'
+                                   ),
+                                   0
+                               ) AS INTEGER
+                           ),
+                           CAST(
+                               coalesce(
+                                   json_extract(
+                                       metadata_json,
+                                       '$.chunk_index'
+                                   ),
+                                   0
+                               ) AS INTEGER
+                           )
+                    """,
+                    (
+                        anchor.source_name,
+                        str(anchor_meta.get("session_id") or ""),
+                        str(anchor_meta.get("profile") or "default"),
+                    ),
+                ).fetchall()
+            elif anchor.kind == "context_mode":
+                session_id = str(anchor_meta.get("session_id") or "")
                 database = str(anchor_meta.get("database") or "")
-                source_id = int(anchor_meta.get("source_id") or 0)
-                candidates = [
-                    item
-                    for item in candidates
-                    if str(item.metadata.get("database") or "") == database
-                    and int(item.metadata.get("source_id") or 0) == source_id
-                ]
-            key = lambda item: (
-                str(item.metadata.get("timestamp") or ""),
-                int(item.metadata.get("rowid") or 0),
-                int(item.metadata.get("chunk_index") or 0),
-            )
-        else:
-            return [anchor]
-        candidates.sort(key=key)
+                if session_id:
+                    rows = connection.execute(
+                        """
+                        SELECT record_id, source_name, kind, title, content,
+                               locator, metadata_json
+                          FROM documents
+                         WHERE source_name = ?
+                           AND kind = 'context_mode'
+                           AND json_extract(
+                                   metadata_json,
+                                   '$.database'
+                               ) = ?
+                           AND json_extract(
+                                   metadata_json,
+                                   '$.session_id'
+                               ) = ?
+                      ORDER BY CAST(
+                                   coalesce(
+                                       json_extract(
+                                           metadata_json,
+                                           '$.rowid'
+                                       ),
+                                       0
+                                   ) AS INTEGER
+                               ),
+                               CAST(
+                                   coalesce(
+                                       json_extract(
+                                           metadata_json,
+                                           '$.chunk_index'
+                                       ),
+                                       0
+                                   ) AS INTEGER
+                               )
+                        """,
+                        (anchor.source_name, database, session_id),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT record_id, source_name, kind, title, content,
+                               locator, metadata_json
+                          FROM documents
+                         WHERE source_name = ?
+                           AND kind = 'context_mode'
+                           AND json_extract(
+                                   metadata_json,
+                                   '$.database'
+                               ) = ?
+                           AND CAST(
+                                   coalesce(
+                                       json_extract(
+                                           metadata_json,
+                                           '$.source_id'
+                                       ),
+                                       0
+                                   ) AS INTEGER
+                               ) = ?
+                      ORDER BY CAST(
+                                   coalesce(
+                                       json_extract(
+                                           metadata_json,
+                                           '$.rowid'
+                                       ),
+                                       0
+                                   ) AS INTEGER
+                               ),
+                               CAST(
+                                   coalesce(
+                                       json_extract(
+                                           metadata_json,
+                                           '$.chunk_index'
+                                       ),
+                                       0
+                                   ) AS INTEGER
+                               )
+                        """,
+                        (
+                            anchor.source_name,
+                            database,
+                            int(anchor_meta.get("source_id") or 0),
+                        ),
+                    ).fetchall()
+            else:
+                return [anchor]
+        candidates = [self._row_to_document(item) for item in rows]
         try:
             position = next(
                 index for index, item in enumerate(candidates) if item.record_id == record_id
@@ -208,4 +505,3 @@ class ArchiveStore:
         except StopIteration:
             return [anchor]
         return candidates[max(0, position - before):position + after + 1]
-

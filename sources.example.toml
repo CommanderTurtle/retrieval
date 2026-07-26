@@ -14,12 +14,6 @@ path = "~/.hermes"
 enabled = true
 
 [[sources]]
-name = "librarian"
-kind = "librarian"
-path = "${HERMES_PROJECTS_DIR}/librarian/data"
-enabled = true
-
-[[sources]]
 name = "humanizer"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/humanizer"

@@ -352,6 +352,7 @@ source = { editable = "." }
 dependencies = [
     { name = "chromadb-client" },
     { name = "fastembed" },
+    { name = "filelock" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "pyyaml" },
@@ -366,6 +367,7 @@ dev = [
 requires-dist = [
     { name = "chromadb-client", specifier = ">=1.0,<2" },
     { name = "fastembed", specifier = ">=0.7,<1" },
+    { name = "filelock", specifier = ">=3.20,<4" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "pyyaml", specifier = ">=6,<7" },

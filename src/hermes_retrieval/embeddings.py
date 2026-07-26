@@ -107,10 +107,15 @@ def build_embedders(settings: Settings) -> tuple[list[Embedder], list[str]]:
         except Exception as exc:
             errors.append(f"custom: {type(exc).__name__}: {exc}")
             logger.warning("Custom embedding endpoint unavailable: %s", exc)
+        else:
+            # The configured Diogenes/OpenAI-compatible lane is authoritative.
+            # Loading FastEmbed as a second lane here would duplicate every
+            # vector and instantiate another local embedding model for no
+            # retrieval benefit.
+            return embedders, errors
     try:
         embedders.append(FastEmbedder(settings))
     except Exception as exc:
         errors.append(f"fastembed: {type(exc).__name__}: {exc}")
         logger.warning("FastEmbed unavailable: %s", exc)
     return embedders, errors
-

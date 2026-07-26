@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections import deque
+from datetime import datetime
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -42,14 +45,17 @@ def _iter_skill_paths(root: Path) -> Iterable[Path]:
     selected = {
         path.absolute()
         for path in root.rglob("SKILL.md")
-        if not any(part in {".git", "node_modules", ".venv"} for part in path.parts)
+        if not any(
+            part in {".git", ".retrieval-archive", "node_modules", ".venv"}
+            for part in path.parts
+        )
     }
     for directory in root.rglob("*"):
         if not directory.is_symlink():
             continue
         logical_path = (directory / "SKILL.md").absolute()
         if any(
-            part in {".git", "node_modules", ".venv"}
+            part in {".git", ".retrieval-archive", "node_modules", ".venv"}
             for part in logical_path.parts
         ):
             continue
@@ -179,30 +185,6 @@ def iter_workflows(source: SourceConfig) -> Iterable[Document]:
                 )
 
 
-def iter_librarian(source: SourceConfig) -> Iterable[Document]:
-    for path in sorted(source.path.rglob("*.md")):
-        if any(part.startswith(".") for part in path.relative_to(source.path).parts):
-            continue
-        path = _safe_resolve(path, source.path)
-        text = path.read_text(encoding="utf-8", errors="replace")
-        relative = path.relative_to(source.path).as_posix()
-        title = markdown_title(text, path.stem)
-        for index, piece in chunk_text(text):
-            yield Document(
-                record_id=stable_id(source.kind, source.name, relative, index),
-                source_name=source.name,
-                kind=source.kind,
-                title=title,
-                content=piece,
-                locator=str(path),
-                metadata={
-                    "relative_path": relative,
-                    "chunk_index": index,
-                    "content_hash": content_hash(piece),
-                },
-            )
-
-
 def iter_context_mode(source: SourceConfig) -> Iterable[Document]:
     for database in sorted(source.path.glob("*.db")):
         connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
@@ -257,80 +239,293 @@ def iter_context_mode(source: SourceConfig) -> Iterable[Document]:
             connection.close()
 
 
-def iter_hermes_sessions(source: SourceConfig, settings: Settings) -> Iterable[Document]:
-    with tempfile.NamedTemporaryFile(prefix="hermes-retrieval-", suffix=".jsonl", delete=False) as handle:
-        export_path = Path(handle.name)
-    try:
-        command = [
-            settings.hermes_command,
-            "sessions",
-            "export",
-            str(export_path),
-            "--format",
-            "jsonl",
-            "--redact",
-            "--yes",
-            "--min-messages",
-            "1",
-        ]
-        if settings.hermes_session_newer_than:
-            command.extend(["--newer-than", settings.hermes_session_newer_than])
-        result = subprocess.run(
-            command,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=300,
-            check=False,
-        )
-        if result.returncode:
-            raise RuntimeError(
-                f"Hermes export failed ({result.returncode}): {result.stderr[-1000:]}"
+def _hermes_session_homes(source: SourceConfig) -> list[tuple[str, Path]]:
+    """Return the default Hermes home and every locally stored named profile."""
+    homes = [("default", source.path)]
+    profiles = source.path / "profiles"
+    if not profiles.is_dir():
+        return homes
+    for profile_home in sorted(profiles.iterdir(), key=lambda path: path.name):
+        if (
+            profile_home.is_dir()
+            and not profile_home.is_symlink()
+            and (
+                (profile_home / "state.db").is_file()
+                or (profile_home / "sessions" / "sessions.json").is_file()
             )
-        with export_path.open(encoding="utf-8") as rows:
-            for raw in rows:
-                if not raw.strip():
-                    continue
-                session = json.loads(raw)
-                session_id = str(session.get("id") or "")
-                title = str(session.get("title") or "Hermes session")
-                for position, message in enumerate(session.get("messages") or []):
-                    role = str(message.get("role") or "")
-                    if role not in {"user", "assistant", "tool"}:
-                        continue
-                    text = str(message.get("content") or "").strip()
-                    if not text:
-                        continue
-                    tool_name = str(message.get("tool_name") or "")
-                    prefix = f"tool[{tool_name}]" if role == "tool" and tool_name else role
-                    message_id = str(message.get("id") or position)
-                    for index, piece in chunk_text(text):
-                        canonical = f"{session_id}:{message_id}:{index}"
-                        yield Document(
-                            record_id=stable_id(source.kind, source.name, canonical),
-                            source_name=source.name,
-                            kind=source.kind,
-                            title=title,
-                            content=f"{prefix}: {piece}",
-                            locator=f"hermes-session:{session_id}#message={message_id}",
-                            metadata={
-                                "session_id": session_id,
-                                "message_id": message_id,
-                                "message_position": position,
-                                "role": role,
-                                "tool_name": tool_name,
-                                "timestamp": float(message.get("timestamp") or 0),
-                                "session_started_at": float(session.get("started_at") or 0),
-                                "session_ended_at": float(session.get("ended_at") or 0),
-                                "model": str(session.get("model") or ""),
-                                "provider": str(session.get("billing_provider") or ""),
-                                "source": str(session.get("source") or ""),
-                                "chunk_index": index,
-                                "content_hash": content_hash(piece),
-                            },
-                        )
+        ):
+            homes.append((profile_home.name, profile_home))
+    return homes
+
+
+def _context_mode_metrics(
+    profile_home: Path,
+) -> tuple[dict[str, dict[str, object]], dict[tuple[str, str], deque[dict[str, object]]]]:
+    """Load small linkage metadata from Hermes' context-mode plugin, if present."""
+    database = profile_home / "plugins" / "hermes-context-mode" / "metrics.db"
+    if not database.is_file():
+        return {}, {}
+    connection = sqlite3.connect(
+        f"file:{database}?mode=ro",
+        uri=True,
+        timeout=5,
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        summaries = {
+            str(row["session_id"]): dict(row)
+            for row in connection.execute(
+                """
+                SELECT session_id, platform, model, started, ended, tool_calls,
+                       bytes_saved, tools_saved, blocks
+                  FROM session_metrics
+                """
+            )
+        }
+        savings: dict[tuple[str, str], deque[dict[str, object]]] = {}
+        for row in connection.execute(
+            """
+            SELECT id, session_id, tool_name, original_bytes, saved_bytes,
+                   sandbox_path, ts
+              FROM tool_savings
+          ORDER BY id
+            """
+        ):
+            key = (
+                str(row["session_id"] or ""),
+                str(row["tool_name"] or ""),
+            )
+            saving = dict(row)
+            try:
+                saving["_epoch"] = datetime.fromisoformat(
+                    str(row["ts"]).replace("Z", "+00:00")
+                ).timestamp()
+            except (TypeError, ValueError):
+                saving["_epoch"] = 0.0
+            savings.setdefault(key, deque()).append(saving)
+        return summaries, savings
+    except sqlite3.OperationalError as exc:
+        logger.warning("Context-mode metrics are unavailable at %s: %s", database, exc)
+        return {}, {}
     finally:
-        export_path.unlink(missing_ok=True)
+        connection.close()
+
+
+def _serialized_tool_calls(message: dict[str, object]) -> str:
+    value = message.get("tool_calls")
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _take_context_saving(
+    savings: dict[tuple[str, str], deque[dict[str, object]]],
+    session_id: str,
+    tool_name: str,
+    message_timestamp: float,
+) -> dict[str, object] | None:
+    linked = savings.get((session_id, tool_name))
+    if not linked or not message_timestamp:
+        return None
+    # The plugin and Hermes state database use different IDs, but both record
+    # wall-clock time. Link only a close event; never assign the next saving to
+    # an unrelated earlier call merely because its tool name matches.
+    while linked and float(linked[0].get("_epoch") or 0) < message_timestamp - 30:
+        linked.popleft()
+    if (
+        linked
+        and abs(float(linked[0].get("_epoch") or 0) - message_timestamp) <= 30
+    ):
+        return linked.popleft()
+    return None
+
+
+def iter_hermes_sessions(source: SourceConfig, settings: Settings) -> Iterable[Document]:
+    # Explicitly scope each export. Both the default and Librarian MCP servers
+    # can host Retrieval, so inheriting that process's HERMES_HOME would make
+    # watcher leadership nondeterministically omit the other profile.
+    for profile_name, profile_home in _hermes_session_homes(source):
+        session_metrics, tool_savings = _context_mode_metrics(profile_home)
+        with tempfile.NamedTemporaryFile(
+            prefix=f"hermes-retrieval-{profile_name}-",
+            suffix=".jsonl",
+            delete=False,
+        ) as handle:
+            export_path = Path(handle.name)
+        try:
+            command = [
+                settings.hermes_command,
+                "sessions",
+                "export",
+                str(export_path),
+                "--format",
+                "jsonl",
+                "--redact",
+                "--yes",
+                "--min-messages",
+                "1",
+            ]
+            if settings.hermes_session_newer_than:
+                command.extend(["--newer-than", settings.hermes_session_newer_than])
+            environment = os.environ.copy()
+            environment["HERMES_HOME"] = str(profile_home)
+            if profile_name == "default":
+                environment.pop("HERMES_PROFILE", None)
+            else:
+                environment["HERMES_PROFILE"] = profile_name
+            result = subprocess.run(
+                command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=300,
+                check=False,
+                env=environment,
+            )
+            if result.returncode:
+                raise RuntimeError(
+                    "Hermes export failed for profile "
+                    f"{profile_name!r} ({result.returncode}): "
+                    f"{result.stderr[-1000:]}"
+                )
+            with export_path.open(encoding="utf-8") as rows:
+                for raw in rows:
+                    if not raw.strip():
+                        continue
+                    session = json.loads(raw)
+                    session_id = str(session.get("id") or "")
+                    title = str(session.get("title") or "Hermes session")
+                    metrics = session_metrics.get(session_id, {})
+                    for position, message in enumerate(session.get("messages") or []):
+                        role = str(message.get("role") or "")
+                        if role not in {"user", "assistant", "tool"}:
+                            continue
+                        raw_content = message.get("content")
+                        if isinstance(raw_content, str):
+                            text = raw_content.strip()
+                        elif raw_content:
+                            try:
+                                text = json.dumps(
+                                    raw_content,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                )
+                            except (TypeError, ValueError):
+                                text = str(raw_content)
+                        else:
+                            text = ""
+                        tool_calls = _serialized_tool_calls(message)
+                        # Preserve the assistant-side call event even when it
+                        # has no prose content. Otherwise the exact call/result
+                        # adjacency disappears from the durable timeline.
+                        if not text and tool_calls:
+                            text = f"tool calls: {tool_calls}"
+                        if not text:
+                            continue
+                        tool_name = str(message.get("tool_name") or "")
+                        prefix = (
+                            f"tool[{tool_name}]"
+                            if role == "tool" and tool_name
+                            else role
+                        )
+                        message_id = str(message.get("id") or position)
+                        message_timestamp = float(
+                            message.get("timestamp") or 0
+                        )
+                        saving = (
+                            _take_context_saving(
+                                tool_savings,
+                                session_id,
+                                tool_name,
+                                message_timestamp,
+                            )
+                            if role == "tool" and tool_name
+                            else None
+                        )
+                        for index, piece in chunk_text(text):
+                            canonical = f"{session_id}:{message_id}:{index}"
+                            locator = (
+                                f"hermes-session:{session_id}#message={message_id}"
+                            )
+                            if profile_name != "default":
+                                canonical = f"{profile_name}:{canonical}"
+                                locator = (
+                                    f"hermes-session:{profile_name}:{session_id}"
+                                    f"#message={message_id}"
+                                )
+                            yield Document(
+                                record_id=stable_id(
+                                    source.kind,
+                                    source.name,
+                                    canonical,
+                                ),
+                                source_name=source.name,
+                                kind=source.kind,
+                                title=title,
+                                content=f"{prefix}: {piece}",
+                                locator=locator,
+                                metadata={
+                                    "profile": profile_name,
+                                    "session_id": session_id,
+                                    "message_id": message_id,
+                                    "sequence": int(message.get("id") or position),
+                                    "message_position": position,
+                                    "role": role,
+                                    "tool_name": tool_name,
+                                    "tool_call_id": str(
+                                        message.get("tool_call_id") or ""
+                                    ),
+                                    "tool_calls": tool_calls,
+                                    "timestamp": message_timestamp,
+                                    "session_started_at": float(
+                                        session.get("started_at") or 0
+                                    ),
+                                    "session_ended_at": float(
+                                        session.get("ended_at") or 0
+                                    ),
+                                    "model": str(session.get("model") or ""),
+                                    "provider": str(
+                                        session.get("billing_provider") or ""
+                                    ),
+                                    "source": str(session.get("source") or ""),
+                                    "parent_session_id": str(
+                                        session.get("parent_session_id") or ""
+                                    ),
+                                    "context_mode_bytes_saved": int(
+                                        metrics.get("bytes_saved") or 0
+                                    ),
+                                    "context_mode_blocks": int(
+                                        metrics.get("blocks") or 0
+                                    ),
+                                    "context_mode_tools_saved": str(
+                                        metrics.get("tools_saved") or ""
+                                    ),
+                                    "context_mode_saving_id": int(
+                                        (saving or {}).get("id") or 0
+                                    ),
+                                    "context_mode_original_bytes": int(
+                                        (saving or {}).get("original_bytes") or 0
+                                    ),
+                                    "context_mode_saved_bytes": int(
+                                        (saving or {}).get("saved_bytes") or 0
+                                    ),
+                                    "context_mode_sandbox_path": str(
+                                        (saving or {}).get("sandbox_path") or ""
+                                    ),
+                                    "context_mode_saving_timestamp": str(
+                                        (saving or {}).get("ts") or ""
+                                    ),
+                                    "chunk_index": index,
+                                    "content_hash": content_hash(piece),
+                                },
+                            )
+        finally:
+            export_path.unlink(missing_ok=True)
 
 
 def iter_documents(source: SourceConfig, settings: Settings) -> Iterable[Document]:
@@ -338,8 +533,6 @@ def iter_documents(source: SourceConfig, settings: Settings) -> Iterable[Documen
         return iter_skills(source)
     if source.kind == "workflows":
         return iter_workflows(source)
-    if source.kind == "librarian":
-        return iter_librarian(source)
     if source.kind == "context_mode":
         return iter_context_mode(source)
     if source.kind == "hermes_sessions":
@@ -429,7 +622,10 @@ def skill_bundle_files(source: SourceConfig, skill_path: Path) -> tuple[list[Pat
 
     resources = []
     for path in sorted(skill_root.rglob("*")):
-        if not path.is_file() or any(part in {".git", "node_modules", ".venv"} for part in path.parts):
+        if not path.is_file() or any(
+            part in {".git", ".retrieval-archive", "node_modules", ".venv"}
+            for part in path.parts
+        ):
             continue
         resources.append(
             {
