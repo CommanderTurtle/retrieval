@@ -47,6 +47,7 @@ Review both local configuration files before starting:
 ```bash
 ${EDITOR:-vi} .env
 ${EDITOR:-vi} sources.toml
+./install-watcher.sh
 ./start.sh
 ```
 
@@ -54,13 +55,18 @@ ${EDITOR:-vi} sources.toml
 absolute path through the Hermes MCP UI or CLI. Setup deliberately does not
 change Hermes profiles, MCP registrations, hooks, or gateway state.
 
-The MCP starts its own source watcher. On Linux and WSL it uses native inotify;
-other platforms fall back to inexpensive source-fingerprint polling. Startup
-reconciles missing or stale collections once. After that, filesystem and
-SQLite/WAL events are debounced and only affected configured sources are
-reconciled. A cross-process leader lock elects one watcher, and a separate
-writer lock prevents the default and Librarian Hermes profiles from racing.
-Search calls never scan sources or trigger maintenance.
+`install-watcher.sh` installs an idempotent systemd user service that keeps
+Retrieval current whether or not a Hermes client is connected. On Linux and
+WSL it uses native inotify; other platforms can run
+`.venv/bin/hermes-retrieval watch` under their native service manager and use
+inexpensive source-fingerprint polling. Startup reconciles missing or stale
+collections once. After that, filesystem and SQLite/WAL events are debounced
+and only affected configured sources are reconciled.
+
+MCP processes also start a watcher, but a cross-process leader lock leaves them
+in safe standby while the persistent service owns refreshes. A separate writer
+lock prevents the default and Librarian Hermes profiles from racing. Search
+calls never scan sources or trigger maintenance.
 
 One configured Hermes root includes its default session database, named
 profiles beneath `profiles/`, and context-mode plugin metrics. Exports are
@@ -92,12 +98,13 @@ The CLI exposes the same core operations:
 .venv/bin/hermes-retrieval status
 .venv/bin/hermes-retrieval sync
 .venv/bin/hermes-retrieval recall "prior CUDA decision"
+.venv/bin/hermes-retrieval watch
 ```
 
 `sync` is an explicit recovery/admin command; routine source refresh is
-automatic while the MCP is connected. `status` reports watcher leadership,
-backend health, pending/stale sources, checkpoints, collection counts, and the
-last successful refresh.
+automatic and does not depend on an MCP connection. `status` reports watcher
+leadership, backend health, pending/stale sources, checkpoints, collection
+counts, and the last successful refresh.
 
 Skill files also have a small exact-ID housekeeping CLI:
 

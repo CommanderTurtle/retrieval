@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import signal
 import sys
+import threading
 
 from .config import Settings
 from .service import RetrievalService
@@ -51,6 +53,10 @@ def _parser() -> argparse.ArgumentParser:
     skill_restore = skill_commands.add_parser("restore")
     skill_restore.add_argument("skill_id")
     sub.add_parser("serve")
+    sub.add_parser(
+        "watch",
+        help="keep configured sources synchronized independently of an MCP client",
+    )
     return parser
 
 
@@ -114,6 +120,43 @@ def _run_skills(args: argparse.Namespace) -> None:
         raise SystemExit(2) from exc
 
 
+def _run_watcher() -> None:
+    service = RetrievalService()
+    if not service.settings.watch_enabled:
+        print(
+            "hermes-retrieval: source watching is disabled by "
+            "RETRIEVAL_WATCH_ENABLED",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    stopping = threading.Event()
+
+    def request_stop(signum: int, _frame: object) -> None:
+        logging.getLogger(__name__).info(
+            "Stopping Retrieval watcher after signal %s",
+            signum,
+        )
+        stopping.set()
+
+    previous_handlers = {
+        signum: signal.signal(signum, request_stop)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    service.start_watcher()
+    logging.getLogger(__name__).info(
+        "Retrieval watcher is active for %d configured sources",
+        len(service.sources),
+    )
+    try:
+        while not stopping.wait(1.0):
+            pass
+    finally:
+        service.stop_watcher()
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -125,6 +168,9 @@ def main() -> None:
     if args.command == "serve":
         from .server import main as serve
         serve()
+        return
+    if args.command == "watch":
+        _run_watcher()
         return
     if args.command == "skills":
         _run_skills(args)
