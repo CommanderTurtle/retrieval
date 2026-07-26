@@ -139,7 +139,13 @@ class Settings:
             kind = str(row["kind"]).strip()
             if not name or name in seen:
                 raise ValueError(f"source names must be non-empty and unique: {name!r}")
-            if kind not in {"skills", "context_mode", "hermes_sessions", "librarian"}:
+            if kind not in {
+                "skills",
+                "workflows",
+                "context_mode",
+                "hermes_sessions",
+                "librarian",
+            }:
                 raise ValueError(f"unsupported source kind {kind!r} for {name}")
             raw_path = os.path.expandvars(os.path.expanduser(str(row["path"])))
             out.append(

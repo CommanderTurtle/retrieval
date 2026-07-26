@@ -42,6 +42,26 @@ def load_skills(skill_ids: list[str]) -> dict:
 
 
 @mcp.tool()
+def find_workflows(
+    query: str,
+    workflow_types: list[str] | None = None,
+    limit: int = 8,
+) -> dict:
+    """Find opt-in agent personas, commands, or hooks without activating them."""
+    return _service().find_workflows(
+        query=query,
+        workflow_types=workflow_types,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+def load_workflows(workflow_ids: list[str]) -> dict:
+    """Load selected workflow definitions; hooks remain inactive unless installed manually."""
+    return _service().load_workflows(workflow_ids=workflow_ids)
+
+
+@mcp.tool()
 def recall(
     query: str,
     sources: list[str] | None = None,

@@ -19,6 +19,8 @@ FastEmbed cache.
 ./start.sh
 ```
 
-Use `hermes-retrieval sync`, `hermes-retrieval status`, or the five MCP tools:
-`find_skills`, `load_skills`, `recall`, `sync_sources`, and
-`retrieval_status`.
+Use `hermes-retrieval sync`, `hermes-retrieval status`, or the seven MCP tools:
+`find_skills`, `load_skills`, `find_workflows`, `load_workflows`, `recall`,
+`sync_sources`, and `retrieval_status`. Workflows are opt-in agent personas,
+commands, and hook definitions. Loading a hook returns its canonical source but
+never activates it.

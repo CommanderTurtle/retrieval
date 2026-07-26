@@ -32,6 +32,12 @@ path = "${HERMES_PROJECTS_DIR}/agent-skills"
 enabled = true
 
 [[sources]]
+name = "agent-workflows"
+kind = "workflows"
+path = "${HERMES_PROJECTS_DIR}/agent-skills"
+enabled = true
+
+[[sources]]
 name = "cybersecurity-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/Anthropic-Cybersecurity-Skills"
@@ -42,4 +48,3 @@ name = "interface-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/make-interfaces-feel-better"
 enabled = true
-

@@ -19,6 +19,17 @@ def _parser() -> argparse.ArgumentParser:
     find.add_argument("--limit", type=int, default=8)
     load = sub.add_parser("load-skills")
     load.add_argument("skill_ids", nargs="+")
+    find_workflows = sub.add_parser("find-workflows")
+    find_workflows.add_argument("query")
+    find_workflows.add_argument(
+        "--type",
+        action="append",
+        choices=["agent", "command", "hook"],
+        dest="workflow_types",
+    )
+    find_workflows.add_argument("--limit", type=int, default=8)
+    load_workflows = sub.add_parser("load-workflows")
+    load_workflows.add_argument("workflow_ids", nargs="+")
     recall = sub.add_parser("recall")
     recall.add_argument("query")
     recall.add_argument("--source", action="append", dest="sources")
@@ -50,6 +61,14 @@ def main() -> None:
         result = service.find_skills(args.query, args.limit)
     elif args.command == "load-skills":
         result = service.load_skills(args.skill_ids)
+    elif args.command == "find-workflows":
+        result = service.find_workflows(
+            args.query,
+            args.workflow_types,
+            args.limit,
+        )
+    elif args.command == "load-workflows":
+        result = service.load_workflows(args.workflow_ids)
     elif args.command == "recall":
         result = service.recall(
             args.query,

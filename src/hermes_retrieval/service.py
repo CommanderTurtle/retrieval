@@ -6,7 +6,12 @@ from .archive import ArchiveStore
 from .config import Settings
 from .index import RetrievalIndex
 from .models import SourceConfig
-from .sources import iter_documents, skill_bundle_files, skill_catalog
+from .sources import (
+    iter_documents,
+    skill_bundle_files,
+    skill_catalog,
+    workflow_catalog,
+)
 
 
 class RetrievalService:
@@ -177,6 +182,97 @@ class RetrievalService:
                 }
             )
         return {"skills": loaded, "total_chars": total}
+
+    def find_workflows(
+        self,
+        query: str,
+        workflow_types: list[str] | None = None,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        limit = max(1, min(limit, 20))
+        allowed_types = {"agent", "command", "hook"}
+        requested_types = set(workflow_types or [])
+        unknown = requested_types - allowed_types
+        if unknown:
+            raise ValueError(
+                f"unknown workflow types: {', '.join(sorted(unknown))}"
+            )
+        hits = self.index.search(
+            query,
+            self._selected(kinds={"workflows"}),
+            limit=max(limit * 5, limit),
+        )
+        rows = []
+        seen: set[str] = set()
+        for hit in hits:
+            workflow_id = str(hit.metadata.get("workflow_id") or "")
+            workflow_type = str(hit.metadata.get("workflow_type") or "")
+            if not workflow_id or workflow_id in seen:
+                continue
+            if requested_types and workflow_type not in requested_types:
+                continue
+            seen.add(workflow_id)
+            rows.append(
+                {
+                    "workflow_id": workflow_id,
+                    "type": workflow_type,
+                    "name": hit.title,
+                    "description": str(hit.metadata.get("description") or ""),
+                    "repository": hit.source_name,
+                    "path": hit.locator,
+                    "score": round(hit.score, 4),
+                    "lane": hit.lane,
+                }
+            )
+            if len(rows) >= limit:
+                break
+        return {
+            "query": query,
+            "types": sorted(requested_types),
+            "matches": rows,
+            "instruction": (
+                "Call load_workflows only for selected workflow IDs. Loading a hook "
+                "returns its source; it does not install or activate the hook."
+            ),
+        }
+
+    def load_workflows(self, workflow_ids: list[str]) -> dict[str, Any]:
+        requested = list(dict.fromkeys(workflow_ids))
+        if not requested:
+            raise ValueError("at least one workflow ID is required")
+        if len(requested) > self.settings.max_skills_per_load:
+            raise ValueError(
+                f"at most {self.settings.max_skills_per_load} workflows may be loaded at once"
+            )
+        catalog = workflow_catalog(self.sources)
+        missing = [workflow_id for workflow_id in requested if workflow_id not in catalog]
+        if missing:
+            raise ValueError(f"unknown workflow IDs: {', '.join(missing)}")
+        loaded = []
+        total = 0
+        for workflow_id in requested:
+            source, path, workflow_type = catalog[workflow_id]
+            content = path.read_text(encoding="utf-8", errors="replace")
+            remaining = min(
+                self.settings.max_skill_chars,
+                self.settings.max_total_skill_chars - total,
+            )
+            truncated = len(content) > max(0, remaining)
+            content = content[: max(0, remaining)]
+            total += len(content)
+            loaded.append(
+                {
+                    "workflow_id": workflow_id,
+                    "type": workflow_type,
+                    "repository": source.name,
+                    "path": str(path),
+                    "content": content,
+                    "chars": len(content),
+                    "truncated": truncated,
+                    "activation": "manual",
+                }
+            )
+        return {"workflows": loaded, "total_chars": total}
 
     def recall(
         self,

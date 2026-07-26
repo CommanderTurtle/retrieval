@@ -2,7 +2,12 @@ from pathlib import Path
 
 from hermes_retrieval.chunking import chunk_text, frontmatter, stable_id
 from hermes_retrieval.models import SourceConfig
-from hermes_retrieval.sources import iter_skills, skill_bundle_files
+from hermes_retrieval.sources import (
+    iter_skills,
+    iter_workflows,
+    skill_bundle_files,
+    workflow_catalog,
+)
 
 
 def test_chunking_is_stable_and_bounded():
@@ -50,4 +55,38 @@ def test_skill_bundle_follows_relative_docs_and_lists_resources(tmp_path: Path):
         "SKILL.md",
         "details.md",
         "script.sh",
+    }
+
+
+def test_workflows_are_discoverable_but_not_activated(tmp_path: Path):
+    agents = tmp_path / "agents"
+    commands = tmp_path / "commands"
+    hooks = tmp_path / "hooks"
+    agents.mkdir()
+    commands.mkdir()
+    hooks.mkdir()
+    (agents / "reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Reviews code.\n---\n# Reviewer",
+        encoding="utf-8",
+    )
+    (commands / "ship.toml").write_text(
+        'description = "Ships safely."\nprompt = "Review first."\n',
+        encoding="utf-8",
+    )
+    (hooks / "session-start.sh").write_text(
+        "#!/bin/sh\n# Injects instructions.\n",
+        encoding="utf-8",
+    )
+    source = SourceConfig("repo", "workflows", tmp_path)
+    docs = list(iter_workflows(source))
+    assert {doc.metadata["workflow_type"] for doc in docs} == {
+        "agent",
+        "command",
+        "hook",
+    }
+    catalog = workflow_catalog([source])
+    assert set(catalog) == {
+        "repo:agents/reviewer.md",
+        "repo:commands/ship.toml",
+        "repo:hooks/session-start.sh",
     }

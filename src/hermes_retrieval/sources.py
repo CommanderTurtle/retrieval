@@ -7,6 +7,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import tomllib
 from typing import Iterable
 
 from .chunking import chunk_text, content_hash, frontmatter, markdown_title, stable_id
@@ -56,6 +57,86 @@ def iter_skills(source: SourceConfig) -> Iterable[Document]:
                     "content_hash": content_hash(piece),
                 },
             )
+
+
+_WORKFLOW_DIRECTORIES = {
+    "agents": "agent",
+    "commands": "command",
+    "hooks": "hook",
+}
+_WORKFLOW_SUFFIXES = {
+    ".bash",
+    ".json",
+    ".md",
+    ".sh",
+    ".toml",
+    ".yaml",
+    ".yml",
+}
+
+
+def _workflow_id(source: SourceConfig, path: Path) -> str:
+    relative = path.relative_to(source.path).as_posix()
+    return f"{source.name}:{relative}"
+
+
+def _workflow_description(path: Path, text: str, workflow_type: str) -> str:
+    if path.suffix.lower() == ".md":
+        description = frontmatter(text).get("description", "").strip()
+        if description:
+            return description[:1000]
+    elif path.suffix.lower() == ".toml":
+        try:
+            description = str(tomllib.loads(text).get("description") or "").strip()
+        except tomllib.TOMLDecodeError:
+            description = ""
+        if description:
+            return description[:1000]
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("#").strip()
+        if line and not line.startswith(("!", "{", "[")):
+            return line[:1000]
+    return f"{workflow_type.title()} definition: {path.stem.replace('-', ' ')}"
+
+
+def iter_workflows(source: SourceConfig) -> Iterable[Document]:
+    """Index opt-in personas, commands, and hooks without activating them."""
+    for directory, workflow_type in _WORKFLOW_DIRECTORIES.items():
+        root = source.path / directory
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in _WORKFLOW_SUFFIXES:
+                continue
+            if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
+                continue
+            path = _safe_resolve(path, source.path)
+            text = path.read_text(encoding="utf-8", errors="replace")
+            relative = path.relative_to(source.path).as_posix()
+            workflow_id = _workflow_id(source, path)
+            title = (
+                frontmatter(text).get("name")
+                if path.suffix.lower() == ".md"
+                else ""
+            ) or path.stem.replace("-", " ")
+            description = _workflow_description(path, text, workflow_type)
+            for index, piece in chunk_text(text):
+                yield Document(
+                    record_id=stable_id(source.kind, source.name, relative, index),
+                    source_name=source.name,
+                    kind=source.kind,
+                    title=title,
+                    content=piece,
+                    locator=str(path),
+                    metadata={
+                        "workflow_id": workflow_id,
+                        "workflow_type": workflow_type,
+                        "description": description,
+                        "relative_path": relative,
+                        "chunk_index": index,
+                        "content_hash": content_hash(piece),
+                    },
+                )
 
 
 def iter_librarian(source: SourceConfig) -> Iterable[Document]:
@@ -215,6 +296,8 @@ def iter_hermes_sessions(source: SourceConfig, settings: Settings) -> Iterable[D
 def iter_documents(source: SourceConfig, settings: Settings) -> Iterable[Document]:
     if source.kind == "skills":
         return iter_skills(source)
+    if source.kind == "workflows":
+        return iter_workflows(source)
     if source.kind == "librarian":
         return iter_librarian(source)
     if source.kind == "context_mode":
@@ -234,6 +317,29 @@ def skill_catalog(sources: list[SourceConfig]) -> dict[str, tuple[SourceConfig, 
                 continue
             safe_path = _safe_resolve(path, source.path)
             catalog[_skill_id(source, safe_path)] = (source, safe_path)
+    return catalog
+
+
+def workflow_catalog(sources: list[SourceConfig]) -> dict[str, tuple[SourceConfig, Path, str]]:
+    catalog: dict[str, tuple[SourceConfig, Path, str]] = {}
+    for source in sources:
+        if not source.enabled or source.kind != "workflows" or not source.path.is_dir():
+            continue
+        for directory, workflow_type in _WORKFLOW_DIRECTORIES.items():
+            root = source.path / directory
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in _WORKFLOW_SUFFIXES:
+                    continue
+                if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
+                    continue
+                safe_path = _safe_resolve(path, source.path)
+                catalog[_workflow_id(source, safe_path)] = (
+                    source,
+                    safe_path,
+                    workflow_type,
+                )
     return catalog
 
 
