@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .archive import ArchiveStore
@@ -100,11 +101,18 @@ class RetrievalService:
         )
         rows = []
         seen: set[str] = set()
+        seen_paths: set[str] = set()
         for hit in hits:
             skill_id = str(hit.metadata.get("skill_id") or "")
-            if not skill_id or skill_id in seen:
+            canonical_path = str(Path(hit.locator).resolve(strict=False))
+            if (
+                not skill_id
+                or skill_id in seen
+                or canonical_path in seen_paths
+            ):
                 continue
             seen.add(skill_id)
+            seen_paths.add(canonical_path)
             rows.append(
                 {
                     "skill_id": skill_id,
