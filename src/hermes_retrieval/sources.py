@@ -106,7 +106,13 @@ def iter_context_mode(source: SourceConfig) -> Iterable[Document]:
                 locator = str(file_path or f"{database}#rowid={rowid}")
                 for index, piece in chunk_text(text):
                     yield Document(
-                        record_id=stable_id(source.kind, source.name, canonical, index),
+                        record_id=stable_id(
+                            source.kind,
+                            source.name,
+                            canonical,
+                            index,
+                            content_hash(piece),
+                        ),
                         source_name=source.name,
                         kind=source.kind,
                         title=str(title or label or "context-mode chunk"),
@@ -169,11 +175,13 @@ def iter_hermes_sessions(source: SourceConfig, settings: Settings) -> Iterable[D
                 title = str(session.get("title") or "Hermes session")
                 for position, message in enumerate(session.get("messages") or []):
                     role = str(message.get("role") or "")
-                    if role not in {"user", "assistant"}:
+                    if role not in {"user", "assistant", "tool"}:
                         continue
                     text = str(message.get("content") or "").strip()
                     if not text:
                         continue
+                    tool_name = str(message.get("tool_name") or "")
+                    prefix = f"tool[{tool_name}]" if role == "tool" and tool_name else role
                     message_id = str(message.get("id") or position)
                     for index, piece in chunk_text(text):
                         canonical = f"{session_id}:{message_id}:{index}"
@@ -182,13 +190,17 @@ def iter_hermes_sessions(source: SourceConfig, settings: Settings) -> Iterable[D
                             source_name=source.name,
                             kind=source.kind,
                             title=title,
-                            content=f"{role}: {piece}",
+                            content=f"{prefix}: {piece}",
                             locator=f"hermes-session:{session_id}#message={message_id}",
                             metadata={
                                 "session_id": session_id,
                                 "message_id": message_id,
+                                "message_position": position,
                                 "role": role,
+                                "tool_name": tool_name,
                                 "timestamp": float(message.get("timestamp") or 0),
+                                "session_started_at": float(session.get("started_at") or 0),
+                                "session_ended_at": float(session.get("ended_at") or 0),
                                 "model": str(session.get("model") or ""),
                                 "provider": str(session.get("billing_provider") or ""),
                                 "source": str(session.get("source") or ""),

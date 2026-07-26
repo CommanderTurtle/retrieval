@@ -42,9 +42,21 @@ def load_skills(skill_ids: list[str]) -> dict:
 
 
 @mcp.tool()
-def recall(query: str, sources: list[str] | None = None, limit: int = 8) -> dict:
-    """Retrieve relevant prior context from sessions, context-mode, or Librarian."""
-    return _service().recall(query=query, sources=sources, limit=limit)
+def recall(
+    query: str,
+    sources: list[str] | None = None,
+    limit: int = 8,
+    before: int = 2,
+    after: int = 3,
+) -> dict:
+    """Retrieve matches with ordered neighboring events from the durable archive."""
+    return _service().recall(
+        query=query,
+        sources=sources,
+        limit=limit,
+        before=before,
+        after=after,
+    )
 
 
 @mcp.tool()

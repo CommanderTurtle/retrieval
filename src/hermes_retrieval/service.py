@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from .archive import ArchiveStore
 from .config import Settings
 from .index import RetrievalIndex
 from .models import SourceConfig
-from .sources import skill_bundle_files, skill_catalog
+from .sources import iter_documents, skill_bundle_files, skill_catalog
 
 
 class RetrievalService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings.load()
         self.sources = self.settings.sources()
+        self.archive = ArchiveStore(self.settings.archive_db)
         self.index = RetrievalIndex(self.settings)
 
     def _selected(
@@ -39,14 +41,36 @@ class RetrievalService:
         return out
 
     def status(self) -> dict[str, Any]:
-        return self.index.status(self.sources)
+        result = self.index.status(self.sources)
+        result["archive"] = {
+            "path": str(self.settings.archive_db),
+            "sources": {
+                source.name: {
+                    "total": self.archive.count(source.name)[0],
+                    "active": self.archive.count(source.name)[1],
+                }
+                for source in self.sources
+            },
+        }
+        return result
 
     def sync(self, names: list[str] | None = None) -> dict[str, Any]:
         selected = self._selected(names=names)
         reports = []
         for source in selected:
             try:
-                reports.append(self.index.sync(source))
+                current = list(iter_documents(source, self.settings))
+                archive_report = self.archive.sync(
+                    source,
+                    current,
+                    retain_history=source.kind in {"context_mode", "hermes_sessions"},
+                )
+                index_report = self.index.sync_documents(
+                    source,
+                    self.archive.documents_for_source(source.name),
+                )
+                index_report["archive"] = archive_report
+                reports.append(index_report)
             except Exception as exc:
                 reports.append(
                     {
@@ -159,6 +183,8 @@ class RetrievalService:
         query: str,
         sources: list[str] | None = None,
         limit: int = 8,
+        before: int = 2,
+        after: int = 3,
     ) -> dict[str, Any]:
         limit = max(1, min(limit, 20))
         selected = self._selected(
@@ -168,18 +194,42 @@ class RetrievalService:
         hits = self.index.search(query, selected, limit=limit)
         remaining = self.settings.max_recall_chars
         rows = []
+        seen_context: set[str] = set()
         for hit in hits:
             if remaining <= 0:
                 break
-            excerpt = hit.content[: min(1200, remaining)]
-            remaining -= len(excerpt)
+            timeline = []
+            neighbors = self.archive.neighbors(
+                hit.record_id,
+                before=max(0, min(before, 10)),
+                after=max(0, min(after, 10)),
+            )
+            for item in neighbors:
+                if item.record_id in seen_context or remaining <= 0:
+                    continue
+                seen_context.add(item.record_id)
+                excerpt = item.content[: min(1200, remaining)]
+                remaining -= len(excerpt)
+                timeline.append(
+                    {
+                        "record_id": item.record_id,
+                        "locator": item.locator,
+                        "excerpt": excerpt,
+                        "role": str(item.metadata.get("role") or ""),
+                        "tool_name": str(item.metadata.get("tool_name") or ""),
+                        "timestamp": item.metadata.get("timestamp", ""),
+                        "message_position": item.metadata.get("message_position"),
+                        "rowid": item.metadata.get("rowid"),
+                    }
+                )
             rows.append(
                 {
                     "source": hit.source_name,
                     "kind": hit.kind,
                     "title": hit.title,
                     "locator": hit.locator,
-                    "excerpt": excerpt,
+                    "matched_excerpt": hit.content[:1200],
+                    "timeline": timeline,
                     "score": round(hit.score, 4),
                     "lane": hit.lane,
                 }

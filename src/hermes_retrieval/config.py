@@ -68,6 +68,7 @@ class Settings:
     chroma_host: str
     chroma_port: int
     chroma_ssl: bool
+    archive_db: Path
     embedding_url: str
     embedding_model: str
     embedding_api_key: str
@@ -93,6 +94,16 @@ class Settings:
             chroma_host=os.getenv("RETRIEVAL_CHROMA_HOST", "127.0.0.1"),
             chroma_port=_int_env("RETRIEVAL_CHROMA_PORT", 8100),
             chroma_ssl=_bool_env("RETRIEVAL_CHROMA_SSL"),
+            archive_db=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_ARCHIVE_DB",
+                            "~/.local/share/hermes-retrieval/archive.sqlite3",
+                        )
+                    )
+                )
+            ).resolve(),
             embedding_url=os.getenv("EMBEDDING_URL", "").strip() or diogenes.get("url", ""),
             embedding_model=os.getenv("EMBEDDING_MODEL", "").strip() or diogenes.get("model", ""),
             embedding_api_key=os.getenv("EMBEDDING_API_KEY", "").strip() or diogenes.get("api_key", ""),

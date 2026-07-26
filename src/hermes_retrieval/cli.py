@@ -23,6 +23,8 @@ def _parser() -> argparse.ArgumentParser:
     recall.add_argument("query")
     recall.add_argument("--source", action="append", dest="sources")
     recall.add_argument("--limit", type=int, default=8)
+    recall.add_argument("--before", type=int, default=2)
+    recall.add_argument("--after", type=int, default=3)
     sub.add_parser("serve")
     return parser
 
@@ -49,7 +51,13 @@ def main() -> None:
     elif args.command == "load-skills":
         result = service.load_skills(args.skill_ids)
     elif args.command == "recall":
-        result = service.recall(args.query, args.sources, args.limit)
+        result = service.recall(
+            args.query,
+            args.sources,
+            args.limit,
+            args.before,
+            args.after,
+        )
     else:
         raise AssertionError(args.command)
     print(json.dumps(result, indent=2, sort_keys=True))

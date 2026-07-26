@@ -11,7 +11,6 @@ from chromadb.config import Settings as ChromaSettings
 from .config import Settings
 from .embeddings import Embedder, build_embedders
 from .models import Document, SearchHit, SourceConfig
-from .sources import iter_documents
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +79,13 @@ class RetrievalIndex:
         self.client.delete_collection(name)
         return self.client.get_or_create_collection(name=name, metadata=expected)
 
-    def sync(self, source: SourceConfig, batch_size: int = 64) -> dict[str, Any]:
-        documents = list(iter_documents(source, self.settings))
+    def sync_documents(
+        self,
+        source: SourceConfig,
+        documents: Iterable[Document],
+        batch_size: int = 64,
+    ) -> dict[str, Any]:
+        documents = list(documents)
         unique = {document.record_id: document for document in documents}
         report: dict[str, Any] = {
             "source": source.name,
@@ -208,4 +212,3 @@ class RetrievalIndex:
             "embedding_errors": self.embedding_errors,
             "sources": rows,
         }
-
