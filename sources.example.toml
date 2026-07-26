@@ -1,0 +1,45 @@
+# Sources are explicit and independently synchronized. Missing optional paths
+# are reported as unavailable; they are never discovered by scanning $HOME.
+
+[[sources]]
+name = "context-mode"
+kind = "context_mode"
+path = "~/.codex/context-mode/content"
+enabled = true
+
+[[sources]]
+name = "hermes-sessions"
+kind = "hermes_sessions"
+path = "~/.hermes"
+enabled = true
+
+[[sources]]
+name = "librarian"
+kind = "librarian"
+path = "${HERMES_PROJECTS_DIR}/librarian/data"
+enabled = true
+
+[[sources]]
+name = "humanizer"
+kind = "skills"
+path = "${HERMES_PROJECTS_DIR}/humanizer"
+enabled = true
+
+[[sources]]
+name = "agent-skills"
+kind = "skills"
+path = "${HERMES_PROJECTS_DIR}/agent-skills"
+enabled = true
+
+[[sources]]
+name = "cybersecurity-skills"
+kind = "skills"
+path = "${HERMES_PROJECTS_DIR}/Anthropic-Cybersecurity-Skills"
+enabled = true
+
+[[sources]]
+name = "interface-skills"
+kind = "skills"
+path = "${HERMES_PROJECTS_DIR}/make-interfaces-feel-better"
+enabled = true
+
