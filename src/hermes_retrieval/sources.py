@@ -34,13 +34,17 @@ def iter_skills(source: SourceConfig) -> Iterable[Document]:
     for path in sorted(source.path.rglob("SKILL.md")):
         if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
             continue
-        path = _safe_resolve(path, source.path)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        logical_path = path.absolute()
+        canonical_path = path.resolve()
+        text = canonical_path.read_text(encoding="utf-8", errors="replace")
         meta = frontmatter(text)
-        skill_id = _skill_id(source, path)
-        title = meta.get("name") or markdown_title(text, path.parent.name or source.name)
+        skill_id = _skill_id(source, logical_path)
+        title = meta.get("name") or markdown_title(
+            text,
+            logical_path.parent.name or source.name,
+        )
         description = (meta.get("description") or "").strip()[:1000]
-        relative = path.relative_to(source.path).as_posix()
+        relative = logical_path.relative_to(source.path).as_posix()
         for index, piece in chunk_text(text):
             yield Document(
                 record_id=stable_id(source.kind, source.name, relative, index),
@@ -48,7 +52,7 @@ def iter_skills(source: SourceConfig) -> Iterable[Document]:
                 kind=source.kind,
                 title=title,
                 content=piece,
-                locator=str(path),
+                locator=str(canonical_path),
                 metadata={
                     "skill_id": skill_id,
                     "description": description,
@@ -322,8 +326,8 @@ def skill_catalog(sources: list[SourceConfig]) -> dict[str, tuple[SourceConfig, 
         for path in source.path.rglob("SKILL.md"):
             if any(part in {".git", "node_modules", ".venv"} for part in path.parts):
                 continue
-            safe_path = _safe_resolve(path, source.path)
-            catalog[_skill_id(source, safe_path)] = (source, safe_path)
+            logical_path = path.absolute()
+            catalog[_skill_id(source, logical_path)] = (source, path.resolve())
     return catalog
 
 
@@ -361,7 +365,7 @@ def skill_bundle_files(source: SourceConfig, skill_path: Path) -> tuple[list[Pat
     remains inside the cloned source repository. Executables and binary assets
     are listed for the agent but are not injected into context.
     """
-    skill_path = _safe_resolve(skill_path, source.path)
+    skill_path = skill_path.resolve()
     skill_root = skill_path.parent
     queue = [skill_path]
     selected: list[Path] = []
@@ -380,9 +384,15 @@ def skill_bundle_files(source: SourceConfig, skill_path: Path) -> tuple[list[Pat
             if not target_text or "://" in target_text or target_text.startswith(("/", "~")):
                 continue
             target = (current.parent / target_text).resolve()
-            try:
-                target.relative_to(source.path.resolve())
-            except ValueError:
+            allowed = False
+            for root in (skill_root, source.path.resolve()):
+                try:
+                    target.relative_to(root)
+                    allowed = True
+                    break
+                except ValueError:
+                    continue
+            if not allowed:
                 continue
             if target.is_file() and target.suffix.lower() in _TEXT_RESOURCE_SUFFIXES:
                 queue.append(target)
