@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import logging
 import sys
 
@@ -12,6 +13,7 @@ logging.basicConfig(
     stream=sys.stderr,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 mcp = FastMCP(
     "Hermes Retrieval",
@@ -22,6 +24,7 @@ mcp = FastMCP(
 )
 
 
+@lru_cache(maxsize=1)
 def _service() -> RetrievalService:
     return RetrievalService()
 
@@ -62,4 +65,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
