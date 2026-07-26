@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import tomllib
@@ -35,6 +36,31 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _diogenes_endpoint() -> dict[str, str]:
+    explicit = os.getenv("DIOGENES_EMBEDDING_ENDPOINT_FILE", "").strip()
+    root = os.getenv("DIOGENES_ROOT", "").strip()
+    if explicit:
+        endpoint_file = Path(os.path.expandvars(os.path.expanduser(explicit)))
+    elif root:
+        endpoint_file = Path(os.path.expandvars(os.path.expanduser(root))) / "data" / "embedding_endpoint.json"
+    else:
+        return {}
+    if not endpoint_file.is_file():
+        return {}
+    try:
+        payload = json.loads(endpoint_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {
+        "url": str(payload.get("url") or "").strip(),
+        "model": str(payload.get("model") or "").strip(),
+        # Diogenes encrypts this field with its installation-specific secret
+        # store. Retrieval deliberately does not duplicate or bypass that
+        # boundary; users can provide EMBEDDING_API_KEY directly when needed.
+        "api_key": "",
+    }
+
+
 @dataclass(frozen=True)
 class Settings:
     root: Path
@@ -60,15 +86,16 @@ class Settings:
     def load(cls, root: Path | None = None) -> "Settings":
         project_root = (root or Path(__file__).resolve().parents[2]).resolve()
         _load_dotenv(project_root / ".env")
+        diogenes = _diogenes_endpoint()
         return cls(
             root=project_root,
             sources_file=project_root / "sources.toml",
             chroma_host=os.getenv("RETRIEVAL_CHROMA_HOST", "127.0.0.1"),
             chroma_port=_int_env("RETRIEVAL_CHROMA_PORT", 8100),
             chroma_ssl=_bool_env("RETRIEVAL_CHROMA_SSL"),
-            embedding_url=os.getenv("EMBEDDING_URL", "").strip(),
-            embedding_model=os.getenv("EMBEDDING_MODEL", "").strip(),
-            embedding_api_key=os.getenv("EMBEDDING_API_KEY", "").strip(),
+            embedding_url=os.getenv("EMBEDDING_URL", "").strip() or diogenes.get("url", ""),
+            embedding_model=os.getenv("EMBEDDING_MODEL", "").strip() or diogenes.get("model", ""),
+            embedding_api_key=os.getenv("EMBEDDING_API_KEY", "").strip() or diogenes.get("api_key", ""),
             embedding_batch_size=max(1, _int_env("EMBEDDING_BATCH_SIZE", 8)),
             embedding_max_chars=max(400, _int_env("EMBEDDING_MAX_CHARS", 4000)),
             fastembed_model=os.getenv(
@@ -114,4 +141,3 @@ class Settings:
             )
             seen.add(name)
         return out
-
