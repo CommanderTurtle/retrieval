@@ -4,6 +4,11 @@ A small semantic routing layer for Hermes. It indexes explicitly configured
 skills, redacted Hermes exports, context-mode chunks, and Librarian knowledge
 without making any of them part of every prompt.
 
+The example catalog includes Hermes's installed skills, generated Firecrawl
+skills, Hermes Workspace skills and agent definitions, and the explicitly
+cloned libraries. Enabled/disabled state is a Hermes concern; retrieval indexes
+both so disabled specialist guidance remains discoverable.
+
 Canonical files remain in their original source. Ephemeral context-mode and
 Hermes session events are preserved in an ordered local SQLite archive before
 Chroma indexes them, so an upstream cleanup cannot erase history. Chroma remains

@@ -26,6 +26,12 @@ path = "${HERMES_PROJECTS_DIR}/humanizer"
 enabled = true
 
 [[sources]]
+name = "hermes-skills"
+kind = "skills"
+path = "~/.hermes/skills"
+enabled = true
+
+[[sources]]
 name = "agent-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/agent-skills"
@@ -47,4 +53,16 @@ enabled = true
 name = "interface-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/make-interfaces-feel-better"
+enabled = true
+
+[[sources]]
+name = "hermes-workspace-skills"
+kind = "skills"
+path = "${HERMES_PROJECTS_DIR}/hermes-workspace/skills"
+enabled = true
+
+[[sources]]
+name = "hermes-workspace-workflows"
+kind = "workflows"
+path = "${HERMES_PROJECTS_DIR}/hermes-workspace"
 enabled = true
