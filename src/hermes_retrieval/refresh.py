@@ -697,8 +697,17 @@ class SourceRefreshWatcher:
                 sources,
                 self.settings.watch_poll_seconds,
             )
+        safety_poll = (
+            _PollingMonitor(sources, self.settings.watch_poll_seconds)
+            if isinstance(monitor, _InotifyMonitor)
+            else None
+        )
         with self._mutex:
-            self._state["backend"] = monitor.name
+            self._state["backend"] = (
+                f"{monitor.name}+fingerprint"
+                if safety_poll is not None
+                else monitor.name
+            )
             self._state["healthy"] = True
             self._state["leader"] = True
         self._publish_state(force=True)
@@ -715,10 +724,10 @@ class SourceRefreshWatcher:
                         exc,
                     )
                     monitor.close()
-                    monitor = _PollingMonitor(
-                        sources,
-                        self.settings.watch_poll_seconds,
+                    monitor = safety_poll or _PollingMonitor(
+                        sources, self.settings.watch_poll_seconds
                     )
+                    safety_poll = None
                     with self._mutex:
                         self._state["backend"] = monitor.name
                         self._state["last_error"] = (
@@ -726,11 +735,16 @@ class SourceRefreshWatcher:
                         )
                     changed = set()
                     overflow = True
+                if safety_poll is not None:
+                    polled, _ = safety_poll.read(timeout=0)
+                    changed.update(polled)
                 if overflow:
                     changed.update(source.name for source in sources)
                 if changed:
                     for source_name in changed:
                         monitor.refresh_source(source_name)
+                        if safety_poll is not None:
+                            safety_poll.refresh_source(source_name)
                     self._queue(changed, event=True)
                 with self._mutex:
                     pending = bool(self._pending)
@@ -753,6 +767,8 @@ class SourceRefreshWatcher:
                 self._state["last_error"] = f"{type(exc).__name__}: {exc}"
         finally:
             monitor.close()
+            if safety_poll is not None:
+                safety_poll.close()
             with self._mutex:
                 self._state["healthy"] = False
                 self._state["leader"] = False
