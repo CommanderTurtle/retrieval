@@ -208,7 +208,7 @@ def source_fingerprint(source: SourceConfig) -> str:
     """Fingerprint canonical source content without querying the vector index."""
     hasher = hashlib.sha256()
     hasher.update(
-        f"v2\0{source.name}\0{source.kind}\0{source.path}\0".encode(
+        f"v3\0{source.name}\0{source.kind}\0{source.state}\0{source.path}\0".encode(
             "utf-8",
             errors="surrogateescape",
         )

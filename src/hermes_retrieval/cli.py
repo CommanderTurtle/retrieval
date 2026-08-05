@@ -7,7 +7,9 @@ import signal
 import sys
 import threading
 
+from .catalog import IweCatalog
 from .config import Settings
+from .projection import SkillProjection, integrate_harnesses
 from .service import RetrievalService
 from .skill_admin import SkillAdmin, SkillAdminError
 
@@ -18,6 +20,33 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("status")
     sync = sub.add_parser("sync")
     sync.add_argument("sources", nargs="*")
+    search = sub.add_parser(
+        "search",
+        help="fused semantic, fuzzy-title, and BM25 search of dormant skills",
+    )
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=8)
+    search.add_argument("--json", action="store_true", dest="as_json")
+    retrieve = sub.add_parser(
+        "retrieve",
+        help="run the isolated scout and project at most one selected skill",
+    )
+    retrieve.add_argument("query")
+    projected = sub.add_parser("projected")
+    projected_commands = projected.add_subparsers(
+        dest="projected_command", required=True
+    )
+    projected_commands.add_parser("list")
+    projected_clear = projected_commands.add_parser("clear")
+    projected_clear.add_argument("skill_ids", nargs="*")
+    catalog = sub.add_parser("catalog")
+    catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
+    catalog_commands.add_parser("sync")
+    catalog_commands.add_parser("stats")
+    sub.add_parser(
+        "integrate",
+        help="register the shared projection directory with Hermes and OMP",
+    )
     find = sub.add_parser("find-skills")
     find.add_argument("query")
     find.add_argument("--limit", type=int, default=8)
@@ -146,7 +175,7 @@ def _run_watcher() -> None:
     service.start_watcher()
     logging.getLogger(__name__).info(
         "Retrieval watcher is active for %d configured sources",
-        len(service.sources),
+        sum(1 for source in service.sources if source.enabled),
     )
     try:
         while not stopping.wait(1.0):
@@ -175,11 +204,47 @@ def main() -> None:
     if args.command == "skills":
         _run_skills(args)
         return
+    if args.command == "integrate":
+        print(json.dumps(integrate_harnesses(Settings.load()), indent=2, sort_keys=True))
+        return
+    if args.command == "catalog":
+        settings = Settings.load()
+        catalog = IweCatalog(settings, settings.sources())
+        result = (
+            catalog.sync()
+            if args.catalog_command == "sync"
+            else catalog.stats()
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+    if args.command == "projected":
+        projection = SkillProjection(Settings.load())
+        result = (
+            projection.list()
+            if args.projected_command == "list"
+            else projection.clear(args.skill_ids or None)
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
     service = RetrievalService()
     if args.command == "status":
         result = service.status()
     elif args.command == "sync":
         result = service.sync(args.sources or None)
+    elif args.command == "search":
+        result = service.search_skills(args.query, args.limit)
+        if not args.as_json:
+            for position, row in enumerate(result["matches"], start=1):
+                categories = ", ".join(row.get("categories") or [])
+                print(
+                    f"{position:>2}. {row['name']}  [{row['state']}]\n"
+                    f"    {row['skill_id']}\n"
+                    f"    {row['description']}\n"
+                    f"    categories: {categories or '-'}"
+                )
+            return
+    elif args.command == "retrieve":
+        result = service.retrieve_skill(args.query)
     elif args.command == "find-skills":
         result = service.find_skills(args.query, args.limit)
     elif args.command == "load-skills":

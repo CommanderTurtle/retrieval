@@ -11,6 +11,11 @@ class SourceConfig:
     kind: str
     path: Path
     enabled: bool = True
+    # ``native`` skills are already visible to a harness, ``cold`` skills live
+    # only in the Retrieval catalog, and ``archived`` skills are intentionally
+    # dormant but remain discoverable.  The state belongs to the canonical
+    # source, never to Chroma or the generated IWE graph.
+    state: str = "cold"
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
 interface:
   display_name: "Retrieve Knowledge"
-  short_description: "Route knowledge, skills, history, and code"
-  default_prompt: "Use $retrieve-knowledge to load only the knowledge needed for this task."
+  short_description: "Retrieve one dormant specialist skill"
+  default_prompt: "Use $retrieve-knowledge to fetch one relevant dormant skill without loading the whole catalog."

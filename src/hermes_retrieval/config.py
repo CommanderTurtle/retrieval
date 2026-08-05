@@ -95,6 +95,20 @@ class Settings:
     max_skill_chars: int
     max_total_skill_chars: int
     max_recall_chars: int
+    catalog_root: Path
+    projection_root: Path
+    iwe_command: str
+    omp_command: str
+    scout_enabled: bool
+    scout_timeout: int
+    scout_max_calls: int
+    scout_profile: str
+    scout_home: Path
+    scout_model: str
+    projection_max_files: int
+    projection_max_bytes: int
+    hermes_config: Path
+    omp_config: Path
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Settings":
@@ -172,6 +186,70 @@ class Settings:
             max_skill_chars=max(1000, _int_env("RETRIEVAL_MAX_SKILL_CHARS", 60000)),
             max_total_skill_chars=max(2000, _int_env("RETRIEVAL_MAX_TOTAL_SKILL_CHARS", 120000)),
             max_recall_chars=max(1000, _int_env("RETRIEVAL_MAX_RECALL_CHARS", 8000)),
+            catalog_root=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_CATALOG_ROOT",
+                            "~/.local/share/hermes-retrieval/catalog",
+                        )
+                    )
+                )
+            ).resolve(),
+            projection_root=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_PROJECTION_ROOT",
+                            "~/.local/share/hermes-retrieval/projections/skills",
+                        )
+                    )
+                )
+            ).resolve(),
+            iwe_command=os.path.expandvars(
+                os.path.expanduser(os.getenv("RETRIEVAL_IWE_COMMAND", "~/.cargo/bin/iwe"))
+            ),
+            omp_command=os.path.expandvars(
+                os.path.expanduser(os.getenv("RETRIEVAL_OMP_COMMAND", "~/.bun/bin/omp"))
+            ),
+            scout_enabled=_bool_env("RETRIEVAL_SCOUT_ENABLED", True),
+            scout_timeout=max(15, _int_env("RETRIEVAL_SCOUT_TIMEOUT", 120)),
+            scout_max_calls=max(1, min(20, _int_env("RETRIEVAL_SCOUT_MAX_CALLS", 8))),
+            scout_profile=os.getenv(
+                "RETRIEVAL_SCOUT_PROFILE", "hermes-retrieval-scout"
+            ).strip(),
+            scout_home=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_SCOUT_HOME",
+                            "~/.local/share/hermes-retrieval/scout-home",
+                        )
+                    )
+                )
+            ).resolve(),
+            scout_model=os.getenv("RETRIEVAL_SCOUT_MODEL", "").strip(),
+            projection_max_files=max(
+                1, _int_env("RETRIEVAL_PROJECTION_MAX_FILES", 2000)
+            ),
+            projection_max_bytes=max(
+                1024,
+                _int_env("RETRIEVAL_PROJECTION_MAX_BYTES", 250 * 1024 * 1024),
+            ),
+            hermes_config=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv("RETRIEVAL_HERMES_CONFIG", "~/.hermes/config.yaml")
+                    )
+                )
+            ).resolve(),
+            omp_config=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv("RETRIEVAL_OMP_CONFIG", "~/.omp/agent/config.yml")
+                    )
+                )
+            ).resolve(),
         )
 
     def sources(self) -> list[SourceConfig]:
@@ -201,6 +279,23 @@ class Settings:
             }:
                 raise ValueError(f"unsupported source kind {kind!r} for {name}")
             raw_path = os.path.expandvars(os.path.expanduser(str(row["path"])))
+            absolute_path = Path(raw_path).absolute()
+            configured_state = str(row.get("state") or "").strip().lower()
+            if configured_state:
+                state = configured_state
+            elif kind == "skills" and ".hermes/skills" in absolute_path.as_posix():
+                state = (
+                    "archived"
+                    if "/.archive" in absolute_path.as_posix()
+                    else "native"
+                )
+            else:
+                state = "cold"
+            if state not in {"native", "cold", "archived"}:
+                raise ValueError(
+                    f"unsupported source state {state!r} for {name}; "
+                    "use native, cold, or archived"
+                )
             out.append(
                 SourceConfig(
                     name=name,
@@ -209,8 +304,9 @@ class Settings:
                     # would erase evidence that a source root is a symlink,
                     # preventing the exact-ID admin CLI from rejecting a
                     # mutating operation through it.
-                    path=Path(raw_path).absolute(),
+                    path=absolute_path,
                     enabled=bool(row.get("enabled", True)),
+                    state=state,
                 )
             )
             seen.add(name)

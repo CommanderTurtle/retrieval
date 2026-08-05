@@ -31,6 +31,27 @@ def test_find_skills_deduplicates_same_file_across_sources(tmp_path: Path) -> No
             ),
         ]
     )
+    service.catalog = SimpleNamespace(
+        entries=lambda: {
+            "first:sample": {
+                "title": "sample",
+                "description": "First",
+                "source": "first",
+                "state": "cold",
+                "categories": [],
+                "canonical_path": str(skill),
+            },
+            "second:sample": {
+                "title": "sample",
+                "description": "Second",
+                "source": "second",
+                "state": "cold",
+                "categories": [],
+                "canonical_path": str(skill),
+            },
+        },
+        find=lambda *_args, **_kwargs: [],
+    )
     service._selected = lambda **_kwargs: []
 
     result = service.find_skills("sample", limit=8)
@@ -71,6 +92,27 @@ def test_find_skills_deduplicates_same_named_variants(tmp_path: Path) -> None:
                 lane="fastembed",
             ),
         ]
+    )
+    service.catalog = SimpleNamespace(
+        entries=lambda: {
+            "external:humanizer": {
+                "title": "Humanizer",
+                "description": "External",
+                "source": "external",
+                "state": "cold",
+                "categories": [],
+                "canonical_path": str(first),
+            },
+            "bundled:humanizer": {
+                "title": "humanizer",
+                "description": "Bundled",
+                "source": "bundled",
+                "state": "cold",
+                "categories": [],
+                "canonical_path": str(second),
+            },
+        },
+        find=lambda *_args, **_kwargs: [],
     )
     service._selected = lambda **_kwargs: []
 

@@ -18,8 +18,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 mcp = FastMCP(
     "Hermes Retrieval",
     instructions=(
-        "Discover and load skills only when needed, or retrieve semantically relevant "
-        "prior context. Chroma is a cache; returned locators identify canonical sources."
+        "Retrieve at most one specialist skill through an isolated read-only scout. "
+        "The exact SKILL.md is returned immediately and its complete package is copied "
+        "only into Retrieval's manifest-owned projection directory. List or clear those "
+        "temporary projections when they are no longer useful."
     ),
 )
 
@@ -30,65 +32,33 @@ def _service() -> RetrievalService:
 
 
 @mcp.tool()
-def find_skills(query: str, limit: int = 8) -> dict:
-    """Find applicable skills by meaning without loading their instructions."""
-    return _service().find_skills(query=query, limit=limit)
+def retrieve_skill(query: str) -> dict:
+    """Find, inspect, and temporarily project at most one relevant dormant skill.
+
+    Selection runs in an ephemeral OMP RPC process with all native tools, skills,
+    rules, and extensions disabled. It can call only Retrieval's read-only search
+    and graph-read tools. The selected SKILL.md is returned verbatim now; the
+    package projection persists for later compaction/reload.
+    """
+
+    return _service().retrieve_skill(query=query)
 
 
 @mcp.tool()
-def load_skills(skill_ids: list[str]) -> dict:
-    """Load the canonical SKILL.md files for one or more selected skill IDs."""
-    return _service().load_skills(skill_ids=skill_ids)
+def list_retrieved_skills() -> dict:
+    """List only temporary skill packages owned by Retrieval's projection manifest."""
+
+    return _service().list_retrieved_skills()
 
 
 @mcp.tool()
-def find_workflows(
-    query: str,
-    workflow_types: list[str] | None = None,
-    limit: int = 8,
-) -> dict:
-    """Find opt-in agent personas, commands, or hooks without activating them."""
-    return _service().find_workflows(
-        query=query,
-        workflow_types=workflow_types,
-        limit=limit,
-    )
+def clear_retrieved_skills(skill_ids: list[str] | None = None) -> dict:
+    """Clear selected temporary projections, or all when IDs are omitted.
 
+    This never mutates canonical, native, or archived skill directories.
+    """
 
-@mcp.tool()
-def load_workflows(workflow_ids: list[str]) -> dict:
-    """Load selected workflow definitions; hooks remain inactive unless installed manually."""
-    return _service().load_workflows(workflow_ids=workflow_ids)
-
-
-@mcp.tool()
-def recall(
-    query: str,
-    sources: list[str] | None = None,
-    limit: int = 8,
-    before: int = 2,
-    after: int = 3,
-) -> dict:
-    """Retrieve matches with ordered neighboring events from the durable archive."""
-    return _service().recall(
-        query=query,
-        sources=sources,
-        limit=limit,
-        before=before,
-        after=after,
-    )
-
-
-@mcp.tool()
-def sync_sources(sources: list[str] | None = None) -> dict:
-    """Refresh explicitly configured canonical sources into the disposable index."""
-    return _service().sync(names=sources)
-
-
-@mcp.tool()
-def retrieval_status() -> dict:
-    """Report configured sources, embedding lanes, and Chroma index counts."""
-    return _service().status()
+    return _service().clear_retrieved_skills(skill_ids=skill_ids)
 
 
 def main() -> None:

@@ -1,0 +1,537 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+from typing import Any, Iterable
+
+import yaml
+
+from .config import Settings
+from .models import SourceConfig
+from .sources import iter_skills
+
+
+_MANIFEST = ".retrieval-catalog.json"
+_MANIFEST_VERSION = 1
+_STATE_PRIORITY = {"archived": 1, "cold": 2, "native": 3}
+_CATEGORY_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("cybersecurity", ("cybersecurity", "security skill")),
+    ("cloud-security", ("aws", "azure", "gcp", "cloud security", "iam")),
+    ("identity-access", ("identity", "oauth", "saml", "credential", "access control")),
+    ("detection-hunting", ("threat hunt", "detection", "siem", "yara", "sigma")),
+    ("incident-response-forensics", ("incident response", "forensic", "dfir")),
+    ("application-security", ("appsec", "web security", "owasp", "vulnerability")),
+    ("network-security", ("network", "firewall", "packet", "dns", "tls")),
+    ("endpoint-windows", ("endpoint", "windows", "active directory", "powershell")),
+    ("containers-kubernetes", ("container", "docker", "kubernetes", "k8s")),
+    ("ot-ics", ("industrial control", "ics", "scada", "operational technology")),
+    ("malware", ("malware", "reverse engineering", "ransomware")),
+    ("governance-compliance", ("compliance", "governance", "audit", "policy")),
+    ("offensive-security", ("penetration", "red team", "exploit", "offensive")),
+    ("hardening", ("hardening", "secure configuration", "baseline")),
+    ("software-development", ("code", "software", "programming", "developer")),
+    ("web", ("browser", "website", "html", "css", "frontend", "web")),
+    ("data", ("database", "sql", "spreadsheet", "data")),
+    ("infrastructure", ("linux", "server", "infrastructure", "devops", "systemd")),
+    ("research", ("research", "paper", "search", "citation")),
+    ("media", ("image", "video", "audio", "media", "design")),
+    ("communications", ("email", "slack", "discord", "signal", "communication")),
+    ("agents", ("agent", "mcp", "prompt", "model", "llm")),
+    ("productivity", ("workflow", "productivity", "document", "planning")),
+)
+
+
+def _slug(value: str, fallback: str = "item") -> str:
+    clean = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    return clean[:80] or fallback
+
+
+def _frontmatter_payload(text: str) -> dict[str, Any]:
+    if not text.startswith("---\n"):
+        return {}
+    end = text.find("\n---", 4)
+    if end < 0:
+        return {}
+    try:
+        payload = yaml.safe_load(text[4:end]) or {}
+    except yaml.YAMLError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _as_terms(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [part.strip() for part in re.split(r"[,;/]", value) if part.strip()]
+    if isinstance(value, list):
+        return [str(part).strip() for part in value if str(part).strip()]
+    return []
+
+
+def _classification(
+    *,
+    source: SourceConfig,
+    title: str,
+    relative_path: str,
+    description: str,
+    text: str,
+) -> tuple[list[str], list[str]]:
+    payload = _frontmatter_payload(text)
+    explicit: list[str] = []
+    for key in ("category", "categories", "tag", "tags"):
+        explicit.extend(_as_terms(payload.get(key)))
+    tags = list(
+        dict.fromkeys(_slug(item, "uncategorized") for item in explicit)
+    )[:12]
+    haystack = " ".join(
+        (source.name, title, relative_path, description, text[:5000])
+    ).casefold()
+    result = []
+    for category, needles in _CATEGORY_RULES:
+        if any(needle in haystack for needle in needles):
+            result.append(category)
+    if not result:
+        result.append("uncategorized")
+    return list(dict.fromkeys(result))[:8], tags
+
+
+def _safe_owned_path(root: Path, relative: str) -> Path:
+    candidate = (root / relative).resolve(strict=False)
+    candidate.relative_to(root.resolve())
+    return candidate
+
+
+def _atomic_text(path: Path, content: str) -> bool:
+    if path.is_file() and path.read_text(encoding="utf-8") == content:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
+
+
+class IweCatalog:
+    """Disposable IWE graph derived from explicitly configured skill sources."""
+
+    def __init__(self, settings: Settings, sources: Iterable[SourceConfig]):
+        self.settings = settings
+        self.sources = list(sources)
+        self.root = settings.catalog_root
+        self.manifest_path = self.root / _MANIFEST
+
+    def _iwe(self) -> str:
+        configured = os.path.expanduser(self.settings.iwe_command)
+        if os.path.sep in configured:
+            path = Path(configured)
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
+        found = shutil.which(configured)
+        if found:
+            return found
+        raise RuntimeError(
+            "IWE is not installed; run cargo install iwe iwes --locked "
+            "or set RETRIEVAL_IWE_COMMAND"
+        )
+
+    def manifest(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"version": _MANIFEST_VERSION, "entries": {}, "owned_files": []}
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != _MANIFEST_VERSION
+            or not isinstance(payload.get("entries"), dict)
+        ):
+            return {"version": _MANIFEST_VERSION, "entries": {}, "owned_files": []}
+        return payload
+
+    def _entries(self) -> tuple[dict[str, dict[str, Any]], int]:
+        candidates: list[dict[str, Any]] = []
+        for source in self.sources:
+            if not source.enabled or source.kind != "skills" or not source.path.is_dir():
+                continue
+            for document in iter_skills(source):
+                item_id = str(document.metadata["skill_id"])
+                canonical_path = str(Path(document.locator).resolve())
+                text = Path(canonical_path).read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                relative_path = str(document.metadata.get("relative_path") or "")
+                categories, tags = _classification(
+                    source=source,
+                    title=document.title,
+                    relative_path=relative_path,
+                    description=str(document.metadata.get("description") or ""),
+                    text=text,
+                )
+                stem = _slug(document.title, _slug(Path(canonical_path).parent.name))
+                digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:8]
+                card = f"skills/{_slug(source.name)}/{stem}-{digest}.md"
+                candidates.append({
+                    "item_id": item_id,
+                    "kind": "skill",
+                    "title": document.title,
+                    "description": str(document.metadata.get("description") or ""),
+                    "source": source.name,
+                    "state": source.state,
+                    "canonical_path": canonical_path,
+                    "relative_path": relative_path,
+                    "categories": categories,
+                    "tags": tags,
+                    "card": card,
+                    "iwe_key": card[:-3],
+                    "descriptor": document.content,
+                })
+
+        def prefer(new: dict[str, Any], current: dict[str, Any]) -> bool:
+            new_priority = _STATE_PRIORITY[str(new["state"])]
+            current_priority = _STATE_PRIORITY[str(current["state"])]
+            if new_priority != current_priority:
+                return new_priority > current_priority
+            new_path = str(new.get("relative_path") or "")
+            current_path = str(current.get("relative_path") or "")
+            return (
+                len(Path(new_path).parts),
+                len(new_path),
+                str(new["item_id"]),
+            ) < (
+                len(Path(current_path).parts),
+                len(current_path),
+                str(current["item_id"]),
+            )
+
+        by_canonical: dict[str, dict[str, Any]] = {}
+        for entry in candidates:
+            key = str(entry["canonical_path"])
+            current = by_canonical.get(key)
+            if current is None or prefer(entry, current):
+                by_canonical[key] = entry
+
+        by_title: dict[str, dict[str, Any]] = {}
+        for entry in by_canonical.values():
+            key = " ".join(str(entry["title"]).casefold().split())
+            current = by_title.get(key)
+            if current is None or prefer(entry, current):
+                by_title[key] = entry
+
+        native_excluded = sum(
+            entry["state"] == "native" for entry in by_title.values()
+        )
+        dormant = {
+            str(entry["item_id"]): entry
+            for entry in by_title.values()
+            if entry["state"] in {"cold", "archived"}
+        }
+        return dict(sorted(dormant.items())), native_excluded
+
+    @staticmethod
+    def _card(entry: dict[str, Any]) -> str:
+        metadata = {
+            "title": entry["title"],
+            "item_id": entry["item_id"],
+            "kind": "skill",
+            "source": entry["source"],
+            "state": entry["state"],
+            "categories": entry["categories"],
+            "tags": entry["tags"],
+            "canonical_path": entry["canonical_path"],
+        }
+        front = yaml.safe_dump(
+            metadata,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        ).rstrip()
+        description = entry["description"] or "No explicit description supplied."
+        return (
+            f"---\n{front}\n---\n\n"
+            f"# {entry['title']}\n\n"
+            f"{description}\n\n"
+            f"{entry['descriptor']}\n"
+        )
+
+    @staticmethod
+    def _hub(title: str, links: list[tuple[str, str]]) -> str:
+        body = [f"# {title}", ""]
+        for label, target in links:
+            body.extend((f"[{label}]({target})", ""))
+        return "\n".join(body).rstrip() + "\n"
+
+    def sync(self) -> dict[str, Any]:
+        self.root.mkdir(parents=True, exist_ok=True)
+        previous = self.manifest()
+        entries, native_excluded = self._entries()
+        owned: set[str] = set()
+        changed = 0
+
+        for entry in entries.values():
+            owned.add(entry["card"])
+            changed += int(
+                _atomic_text(self.root / entry["card"], self._card(entry))
+            )
+
+        source_groups: dict[str, list[dict[str, Any]]] = {}
+        category_groups: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries.values():
+            source_groups.setdefault(entry["source"], []).append(entry)
+            for category in entry["categories"]:
+                category_groups.setdefault(category, []).append(entry)
+
+        source_hubs: list[tuple[str, str]] = []
+        for source_name, rows in sorted(source_groups.items()):
+            relative = f"sources/{_slug(source_name)}.md"
+            owned.add(relative)
+            source_hubs.append((source_name, relative))
+            links = [
+                (row["title"], f"../{row['card']}")
+                for row in sorted(rows, key=lambda item: item["title"].casefold())
+            ]
+            changed += int(
+                _atomic_text(
+                    self.root / relative,
+                    self._hub(f"Source · {source_name}", links),
+                )
+            )
+
+        category_hubs: list[tuple[str, str]] = []
+        for category, rows in sorted(category_groups.items()):
+            relative = f"categories/{_slug(category)}.md"
+            owned.add(relative)
+            category_hubs.append((category.replace("-", " ").title(), relative))
+            links = [
+                (row["title"], f"../{row['card']}")
+                for row in sorted(rows, key=lambda item: item["title"].casefold())
+            ]
+            changed += int(
+                _atomic_text(
+                    self.root / relative,
+                    self._hub(f"Category · {category.replace('-', ' ').title()}", links),
+                )
+            )
+
+        index_links = [
+            ("Browse by source", "sources.md"),
+            ("Browse by category", "categories.md"),
+        ]
+        changed += int(
+            _atomic_text(self.root / "index.md", self._hub("Retrieval catalog", index_links))
+        )
+        owned.add("index.md")
+        changed += int(
+            _atomic_text(
+                self.root / "sources.md",
+                self._hub("Sources", source_hubs),
+            )
+        )
+        owned.add("sources.md")
+        changed += int(
+            _atomic_text(
+                self.root / "categories.md",
+                self._hub("Categories", category_hubs),
+            )
+        )
+        owned.add("categories.md")
+
+        removed = 0
+        for relative in set(previous.get("owned_files") or []) - owned:
+            target = _safe_owned_path(self.root, str(relative))
+            if target.is_file():
+                target.unlink()
+                removed += 1
+        for directory_name in ("skills", "sources", "categories"):
+            base = self.root / directory_name
+            if base.is_dir():
+                for directory in sorted(
+                    (path for path in base.rglob("*") if path.is_dir()),
+                    key=lambda path: len(path.parts),
+                    reverse=True,
+                ):
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
+
+        manifest = {
+            "version": _MANIFEST_VERSION,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "entries": entries,
+            "native_excluded": native_excluded,
+            "owned_files": sorted(owned),
+        }
+        changed += int(
+            _atomic_text(
+                self.manifest_path,
+                json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            )
+        )
+
+        initialized = False
+        if not (self.root / ".iwe" / "config.toml").is_file():
+            result = subprocess.run(
+                [self._iwe(), "init", "--auto", "--library", "."],
+                cwd=self.root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+                check=False,
+            )
+            if result.returncode not in {0, 2}:
+                raise RuntimeError(
+                    f"IWE initialization failed ({result.returncode}): "
+                    f"{(result.stderr or result.stdout)[-1200:]}"
+                )
+            initialized = result.returncode == 0
+        return {
+            "root": str(self.root),
+            "entries": len(entries),
+            "native_excluded": native_excluded,
+            "cold": sum(row["state"] == "cold" for row in entries.values()),
+            "archived": sum(row["state"] == "archived" for row in entries.values()),
+            "files_changed": changed,
+            "files_removed": removed,
+            "iwe_initialized": initialized,
+        }
+
+    def ensure(self) -> None:
+        if not self.manifest_path.is_file():
+            self.sync()
+
+    def entry(self, item_id: str) -> dict[str, Any]:
+        self.ensure()
+        row = self.manifest().get("entries", {}).get(item_id)
+        if not isinstance(row, dict):
+            raise ValueError(f"unknown skill ID: {item_id}")
+        return dict(row)
+
+    def entries(self) -> dict[str, dict[str, Any]]:
+        self.ensure()
+        return {
+            str(key): dict(value)
+            for key, value in self.manifest().get("entries", {}).items()
+            if isinstance(value, dict)
+        }
+
+    def find(
+        self,
+        query: str,
+        *,
+        limit: int = 12,
+        states: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        self.ensure()
+        query = query.strip()
+        if not query:
+            raise ValueError("search query must not be empty")
+        limit = max(1, min(limit, 50))
+        result = subprocess.run(
+            [
+                self._iwe(),
+                "find",
+                "--fuzzy",
+                query,
+                "--lexical",
+                query,
+                "--limit",
+                str(min(250, limit * 8)),
+                "--format",
+                "json",
+            ],
+            cwd=self.root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45,
+            check=False,
+        )
+        if result.returncode:
+            raise RuntimeError(
+                f"IWE search failed ({result.returncode}): {result.stderr[-1200:]}"
+            )
+        try:
+            found = json.loads(result.stdout or "[]")
+        except ValueError as exc:
+            raise RuntimeError("IWE returned invalid JSON") from exc
+        by_key = {row["iwe_key"]: row for row in self.entries().values()}
+        allowed = states or {"cold", "archived"}
+        rows: list[dict[str, Any]] = []
+        for rank, match in enumerate(found, start=1):
+            if not isinstance(match, dict):
+                continue
+            entry = by_key.get(str(match.get("key") or ""))
+            if not entry or entry["state"] not in allowed:
+                continue
+            rows.append({**entry, "iwe_rank": rank})
+            if len(rows) >= limit:
+                break
+        return rows
+
+    def context(self, item_id: str) -> dict[str, Any]:
+        entry = self.entry(item_id)
+        result = subprocess.run(
+            [
+                self._iwe(),
+                "retrieve",
+                "--key",
+                entry["iwe_key"],
+                "--expand-included-by",
+                "1",
+                "--expand-references",
+                "1",
+                "--max-documents",
+                "8",
+                "--max-tokens",
+                "3000",
+                "--max-document-tokens",
+                "1200",
+                "--format",
+                "json",
+            ],
+            cwd=self.root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45,
+            check=False,
+        )
+        if result.returncode:
+            raise RuntimeError(
+                f"IWE retrieval failed ({result.returncode}): {result.stderr[-1200:]}"
+            )
+        try:
+            graph = json.loads(result.stdout or "[]")
+        except ValueError as exc:
+            raise RuntimeError("IWE returned invalid graph JSON") from exc
+        return {"entry": entry, "graph": graph}
+
+    def stats(self) -> dict[str, Any]:
+        manifest = self.manifest()
+        entries = list(manifest.get("entries", {}).values())
+        return {
+            "root": str(self.root),
+            "initialized": (self.root / ".iwe" / "config.toml").is_file(),
+            "entries": len(entries),
+            "native_excluded": int(manifest.get("native_excluded") or 0),
+            "states": {
+                state: sum(row.get("state") == state for row in entries)
+                for state in ("native", "cold", "archived")
+            },
+            "generated_at": manifest.get("generated_at", ""),
+        }

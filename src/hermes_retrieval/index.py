@@ -160,6 +160,34 @@ class RetrievalIndex:
             }
         return report
 
+    def prune_unmanaged(self, sources: Iterable[SourceConfig]) -> list[dict[str, Any]]:
+        """Delete disposable collections for disabled and native-reference sources."""
+
+        removed: list[dict[str, Any]] = []
+        for source in sources:
+            catalog_only = source.kind == "skills" and source.state == "native"
+            if source.enabled and not catalog_only:
+                continue
+            for embedder in self.embedders:
+                name = _collection_name(source, embedder.lane)
+                try:
+                    collection = self.client.get_collection(name)
+                except Exception:
+                    continue
+                count = int(collection.count())
+                self.client.delete_collection(name)
+                removed.append(
+                    {
+                        "source": source.name,
+                        "kind": source.kind,
+                        "lane": embedder.lane,
+                        "collection": name,
+                        "documents": count,
+                        "reason": "native_catalog_only" if catalog_only else "disabled",
+                    }
+                )
+        return removed
+
     def source_health(
         self,
         source: SourceConfig,
@@ -272,6 +300,7 @@ class RetrievalIndex:
                 {
                     "name": source.name,
                     "kind": source.kind,
+                    "state": source.state,
                     "path": str(source.path),
                     "enabled": source.enabled,
                     "available": source.path.exists(),

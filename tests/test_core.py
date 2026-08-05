@@ -37,9 +37,10 @@ def test_skill_source_uses_explicit_root(tmp_path: Path):
     )
     source = SourceConfig("repo", "skills", tmp_path / "skills")
     docs = list(iter_skills(source))
-    assert docs
+    assert len(docs) == 1
     assert docs[0].metadata["skill_id"] == "repo:alpha"
     assert docs[0].metadata["description"] == "Finds alpha."
+    assert docs[0].metadata["state"] == "cold"
     assert docs[0].record_id == stable_id("skills", "repo", "alpha/SKILL.md", 0)
 
 

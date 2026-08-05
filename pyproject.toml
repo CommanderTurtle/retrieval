@@ -1,14 +1,14 @@
 [project]
 name = "hermes-retrieval"
-version = "0.1.0"
-description = "Source-aware semantic retrieval for Hermes"
+version = "0.2.0"
+description = "IWE-backed cold-skill retrieval for Hermes and OMP"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "AGPL-3.0-only"
 authors = [
   { name = "CommanderTurtle" },
 ]
-keywords = ["hermes", "mcp", "retrieval", "rag", "chromadb"]
+keywords = ["hermes", "omp", "iwe", "mcp", "retrieval", "skills", "chromadb"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: GNU Affero General Public License v3",

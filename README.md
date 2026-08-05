@@ -1,33 +1,69 @@
 # Hermes Retrieval
 
-Hermes Retrieval is a small, source-aware semantic routing layer for Hermes. It
-indexes explicitly configured skills, redacted Hermes exports, context-mode
-chunks, and opt-in workflow definitions without placing those libraries in
-every prompt.
+Hermes Retrieval keeps large, specialist skill libraries out of an agent's
+always-on skill inventory without making them hard to use. It builds one compact
+descriptor per skill, combines semantic ranking with an
+[IWE](https://iwe.md/) Markdown graph, and delegates the final choice to a
+short-lived, read-only OMP scout.
 
-Canonical files remain in their original source. Ephemeral context-mode and
-Hermes session events are first preserved in an ordered local SQLite archive,
-then indexed in Chroma, so an upstream cleanup cannot erase history. Chroma is
-a disposable index. Source-code structure belongs to `codebase-memory-mcp`;
-curated knowledge and wiki edits belong to Librarian.
+The selected `SKILL.md` is returned verbatim in the same MCP response, so the
+calling agent can use it immediately. Retrieval also copies the skill's complete
+package into one manifest-owned projection directory shared by Hermes and OMP.
+That temporary copy survives context compaction and becomes natively discoverable
+after `/reload-skills` in Hermes or `/reload` in OMP. Clearing it never touches the
+canonical repository.
 
-That boundary is intentional. Retrieval is the thin durable history and
-catalog layer: it preserves session identity, timestamps, insertion sequence,
-tool-call/result adjacency, and context-mode linkage before indexing changed
-records. It does not ingest or mutate Librarian's OKF knowledge and does not
-build code graphs or wikis. Librarian owns delegated synthesis and editable
-knowledge; `codebase-memory-mcp` owns repository structure.
+## What Retrieval owns
+
+Retrieval has one intentionally narrow responsibility: cold-skill discovery.
+
+- `native` skills already live in a harness-visible tree; their names suppress
+  cold duplicates, but they are neither graphed nor embedded as candidates;
+- `cold` skills remain only in external repositories until selected;
+- `archived` skills remain discoverable but dormant;
+- the generated IWE catalog and Chroma collections are disposable indexes;
+- the projection manifest owns every temporary skill copy it is allowed to
+  remove.
+
+Context Mode owns its context database. Hermes and OMP own their sessions,
+compaction, active skill discovery, and tool history. Librarian owns delegated
+synthesis and editable knowledge. `codebase-memory-mcp` owns repository graphs.
+Those sources can still be indexed through the administrative compatibility
+CLI, but they are disabled in the recommended configuration and are not exposed
+as Retrieval MCP tools.
+
+## Selection flow
+
+1. Chroma ranks one short descriptor per cold or archived skill semantically.
+2. IWE performs fuzzy title and BM25 search over the same skills and exposes
+   controlled source/category graph links.
+3. Reciprocal-rank fusion produces a bounded candidate list.
+4. An ephemeral OMP RPC process searches and reads candidates using exactly two
+   host-owned, read-only tools. Native tools, MCPs, skills, rules, extensions,
+   sessions, LSP, PTY, and the advisor are disabled in its isolated profile.
+   Its HOME and XDG roots are also private, preventing OMP's cross-harness
+   capability discovery from importing Zed, Claude, or other user MCP configs.
+5. The scout may select at most one skill. It must first discover and inspect the
+   selected ID; otherwise Retrieval fails closed.
+6. Retrieval returns the canonical `SKILL.md` verbatim and atomically projects
+   the full package. Symlinks are skipped and file/byte limits are enforced.
+
+The IWE tree is derived from configured sources under
+`~/.local/share/hermes-retrieval/catalog`. It contains readable skill cards plus
+a deliberately small category taxonomy; it is not another canonical library.
 
 ## Requirements
 
-- [uv](https://docs.astral.sh/uv/);
-- Python 3.11 through 3.13 (setup defaults to uv-managed Python 3.13.12);
+- [uv](https://docs.astral.sh/uv/) and Python 3.11 through 3.13;
 - a reachable Chroma server;
-- either an OpenAI-compatible embedding endpoint or the local FastEmbed
-  fallback.
+- either an OpenAI-compatible embedding endpoint or the local FastEmbed fallback;
+- [IWE](https://github.com/iwe-org/iwe) (`setup.sh` installs its CLI with Cargo
+  when absent);
+- an existing [oh-my-pi](https://github.com/can1357/oh-my-pi) installation for
+  delegated selection.
 
-The project has no JavaScript runtime requirement. It does not install Node,
-npm, pnpm, or Bun.
+Retrieval does not install Node, npm, or pnpm. OMP may be installed and updated
+through the user's existing Bun lifecycle.
 
 ## Setup
 
@@ -37,12 +73,9 @@ cd retrieval
 ./setup.sh
 ```
 
-`setup.sh` creates `.env` and `sources.toml` only when they are missing, creates
-the local `.venv` with uv, and synchronizes the committed lock. Set
-`RETRIEVAL_PYTHON` in the invoking shell to select another supported
-interpreter.
-
-Review both local configuration files before starting:
+`setup.sh` creates `.env` and `sources.toml` only when missing, creates the
+uv-managed `.venv`, installs IWE when needed, builds the catalog, and runs the
+idempotent harness integration. Review the local files before starting:
 
 ```bash
 ${EDITOR:-vi} .env
@@ -51,123 +84,105 @@ ${EDITOR:-vi} sources.toml
 ./start.sh
 ```
 
-`start.sh` is a stdio MCP process, not a network dashboard. Register its
-absolute path through the Hermes MCP UI or CLI. Setup deliberately does not
-change Hermes profiles, MCP registrations, hooks, or gateway state.
+Every skill source has an explicit state:
 
-`install-watcher.sh` installs an idempotent systemd user service that keeps
-Retrieval current whether or not a Hermes client is connected. On Linux and
-WSL it uses native inotify; other platforms can run
-`.venv/bin/hermes-retrieval watch` under their native service manager and use
-inexpensive source-fingerprint polling. Startup reconciles missing or stale
-collections once. After that, filesystem and SQLite/WAL events are debounced
-and only affected configured sources are reconciled.
+```toml
+[[sources]]
+name = "hermes-skills"
+kind = "skills"
+path = "~/.hermes/skills"
+enabled = true
+state = "native"
 
-MCP processes also start a watcher, but a cross-process leader lock leaves them
-in safe standby while the persistent service owns refreshes. A separate writer
-lock prevents the default and Librarian Hermes profiles from racing. Search
-calls never scan sources or trigger maintenance.
-
-One configured Hermes root includes its default session database, named
-profiles beneath `profiles/`, and context-mode plugin metrics. Exports are
-explicitly scoped per profile, so whichever MCP process wins watcher leadership
-cannot omit the other profile's sessions.
-
-## Sources and tools
-
-The example catalog includes installed Hermes skills, generated Firecrawl
-skills, Hermes Workspace skills and agent definitions, and explicitly cloned
-libraries. No home-directory discovery scan occurs. Enabled or disabled state
-is a Hermes concern; Retrieval indexes both so specialist guidance remains
-discoverable without activating it.
-
-The seven MCP tools are:
-
-- `find_skills` and `load_skills`;
-- `find_workflows` and `load_workflows`;
-- `recall`;
-- `sync_sources`;
-- `retrieval_status`.
-
-Workflows are opt-in agent personas, commands, and hook definitions. Loading a
-hook returns its canonical source but never activates it.
-
-The CLI exposes the same core operations:
-
-```bash
-.venv/bin/hermes-retrieval status
-.venv/bin/hermes-retrieval sync
-.venv/bin/hermes-retrieval recall "prior CUDA decision"
-.venv/bin/hermes-retrieval watch
+[[sources]]
+name = "specialist-library"
+kind = "skills"
+path = "~/Hermes/specialist-library"
+enabled = true
+state = "cold"
 ```
 
-`sync` is an explicit recovery/admin command; routine source refresh is
-automatic and does not depend on an MCP connection. `status` reports watcher
-leadership, backend health, pending/stale sources, checkpoints, collection
-counts, and the last successful refresh.
+No home-directory discovery scan occurs. `hermes-retrieval integrate` adds only
+the shared projection root to Hermes `skills.external_dirs` and OMP
+`skills.customDirectories`. It also prepares a Retrieval-owned OMP profile with
+the configured model/provider but no inherited MCPs or agent extensions. The
+command is idempotent and does not require a gateway restart.
 
-Skill files also have a small exact-ID housekeeping CLI:
+## MCP surface
 
-```bash
-.venv/bin/hermes-retrieval skills list
-.venv/bin/hermes-retrieval skills inspect hermes-skills:research/example
-.venv/bin/hermes-retrieval skills edit hermes-skills:research/example
-.venv/bin/hermes-retrieval skills archive hermes-skills:research/example
-.venv/bin/hermes-retrieval skills restore hermes-skills:research/example
-```
+The server exposes only three tools:
 
-The list is newest-first with stable names and exact IDs. Edit uses `VISUAL`
-then `EDITOR`. Archive is never automatic: it only accepts an exact ID, rejects
-symlinks and paths outside the configured source/archive roots, and moves one
-skill into the private `RETRIEVAL_SKILL_ARCHIVE`. Restore reverses that move.
-Archive/restore events are observed like any other source change, so their
-vectors are removed or restored automatically.
+- `retrieve_skill(query)` searches, inspects, returns, and projects at most one
+  specialist skill;
+- `list_retrieved_skills()` reports only Retrieval-owned temporary packages;
+- `clear_retrieved_skills(skill_ids?)` removes selected projections, or all when
+  IDs are omitted.
 
-## Embeddings and privacy
-
-`EMBEDDING_URL` uses an explicitly configured OpenAI-compatible endpoint. If
-`DIOGENES_ROOT` is set, Retrieval can follow Diogenes' saved embedding endpoint
-and share its FastEmbed cache. It never copies or decrypts Diogenes' stored API
-key; provide `EMBEDDING_API_KEY` locally when required.
-
-Retrieval sends no telemetry. Its Chroma client explicitly disables anonymized
-telemetry. Network requests go only to the Chroma and embedding endpoints named
-in local configuration. `.env`, `sources.toml`, the uv environment, caches, and
-the SQLite archive are excluded from Git.
-
-When Diogenes publishes an embedding endpoint, Retrieval reuses that HTTP lane
-and the existing Chroma service; it does not launch another model server.
-FastEmbed remains the zero-configuration in-process fallback when no HTTP lane
-is configured.
-
-## Hermes routing skill
-
-After registering the MCP, install the small always-on routing skill only in
-the profiles that should use it:
+`start.sh` is a stdio MCP process. Register its absolute path with the Hermes MCP
+CLI, then install the small always-on routing skill in the profiles that should
+know when to call it:
 
 ```bash
 ./install-hermes-skill.sh
 ./install-hermes-skill.sh --profile librarian
 ```
 
-The separate workflow installer supports `--dry-run`; it never activates
-third-party hooks.
+## CLI
+
+The normal human-facing path is one fused search command:
+
+```bash
+.venv/bin/hermes-retrieval search "audit Kubernetes pod security" --limit 8
+```
+
+Administrative commands are explicit:
+
+```bash
+.venv/bin/hermes-retrieval retrieve "audit Kubernetes pod security"
+.venv/bin/hermes-retrieval projected list
+.venv/bin/hermes-retrieval projected clear
+.venv/bin/hermes-retrieval catalog sync
+.venv/bin/hermes-retrieval catalog stats
+.venv/bin/hermes-retrieval integrate
+.venv/bin/hermes-retrieval status
+.venv/bin/hermes-retrieval sync
+```
+
+The watcher keeps descriptors and the IWE catalog current after source changes;
+search calls do not rescan the filesystem. `sync` remains a recovery/admin
+command. Exact-ID `skills list`, `inspect`, `edit`, `archive`, and `restore`
+commands remain available for deliberate human housekeeping. Archive and restore
+never operate on a fuzzy match.
+
+## Safety and privacy
+
+- Canonical skill repositories are read-only to retrieval and projection flows.
+- Clear operations require both a manifest entry and a matching per-directory
+  ownership marker.
+- Projections are staged and atomically replaced.
+- The scout rejects any OMP process that exposes tools beyond its two registered
+  catalog tools.
+- Catalog fields and skill excerpts are explicitly treated as untrusted data by
+  the scout.
+- Chroma anonymized telemetry, OMP telemetry, and update checks in the isolated
+  profile are disabled.
+- Network requests are limited to the configured Chroma/model endpoints and
+  user-invoked package installation/update sources.
+- `.env`, `sources.toml`, local databases, generated catalogs, projections,
+  caches, and the uv environment are excluded from Git.
 
 ## Update and development
 
 ```bash
 ./update.sh
-```
-
-Updates are fast-forward-only and reconcile the existing local `.venv` from
-`uv.lock`. Restart the Hermes gateway yourself when you are ready for it to
-reload the MCP process.
-
-```bash
 uv sync --frozen
 uv run --frozen pytest -q
 uv build
 ```
+
+`update.sh` remains fast-forward-only. After source updates, restart a persistent
+watcher or Hermes gateway only when its already-running process must load new
+Python code; skill inventory refresh itself uses `/reload-skills` or `/reload`.
 
 ## License
 

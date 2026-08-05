@@ -10,6 +10,21 @@ uv_bin="$(command -v uv || true)"
   exit 1
 }
 
+iwe_bin="$(command -v iwe || true)"
+if [[ -z "$iwe_bin" && -x "$HOME/.cargo/bin/iwe" ]]; then
+  iwe_bin="$HOME/.cargo/bin/iwe"
+fi
+if [[ -z "$iwe_bin" ]]; then
+  cargo_bin="$(command -v cargo || true)"
+  [[ -n "$cargo_bin" ]] || {
+    printf 'IWE requires a native Rust toolchain (cargo): https://rustup.rs/\n' >&2
+    exit 1
+  }
+  "$cargo_bin" install iwe iwes --locked
+  iwe_bin="$HOME/.cargo/bin/iwe"
+fi
+export RETRIEVAL_IWE_COMMAND="${RETRIEVAL_IWE_COMMAND:-$iwe_bin}"
+
 if [[ ! -f .env ]]; then
   cp -- .env.example .env
 fi
@@ -33,6 +48,9 @@ venv_python="$root/.venv/bin/python"
   exit 1
 }
 "$uv_bin" sync --frozen --python "$venv_python"
+"$venv_python" -c 'from hermes_retrieval.config import Settings; Settings.load().skill_archive_root.mkdir(parents=True, exist_ok=True)'
+"$venv_python" -m hermes_retrieval.cli catalog sync
+"$venv_python" -m hermes_retrieval.cli integrate
 
 printf 'Hermes Retrieval is ready in %s\n' "$root"
 printf 'Review .env and sources.toml, then run: %s/start.sh\n' "$root"

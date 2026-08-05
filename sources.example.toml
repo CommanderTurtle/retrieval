@@ -5,58 +5,71 @@
 name = "context-mode"
 kind = "context_mode"
 path = "~/.codex/context-mode/content"
-enabled = true
+enabled = false
 
 [[sources]]
 name = "hermes-sessions"
 kind = "hermes_sessions"
 path = "~/.hermes"
-enabled = true
+enabled = false
 
 [[sources]]
 name = "humanizer"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/humanizer"
 enabled = true
+state = "cold"
 
 [[sources]]
 name = "hermes-skills"
 kind = "skills"
 path = "~/.hermes/skills"
 enabled = true
+state = "native"
+
+[[sources]]
+name = "retrieval-skill-archive"
+kind = "skills"
+path = "${RETRIEVAL_SKILL_ARCHIVE}"
+enabled = true
+state = "archived"
 
 [[sources]]
 name = "agent-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/agent-skills"
 enabled = true
+state = "cold"
 
 [[sources]]
 name = "agent-workflows"
 kind = "workflows"
 path = "${HERMES_PROJECTS_DIR}/agent-skills"
-enabled = true
+enabled = false
 
 [[sources]]
 name = "cybersecurity-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/Anthropic-Cybersecurity-Skills"
 enabled = true
+state = "cold"
 
 [[sources]]
 name = "interface-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/make-interfaces-feel-better"
 enabled = true
+state = "cold"
 
 [[sources]]
 name = "hermes-workspace-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/hermes-workspace/skills"
 enabled = true
+state = "cold"
 
 [[sources]]
 name = "hermes-workspace-workflows"
 kind = "workflows"
 path = "${HERMES_PROJECTS_DIR}/hermes-workspace"
-enabled = true
+enabled = false

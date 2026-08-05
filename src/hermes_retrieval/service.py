@@ -7,9 +7,11 @@ from typing import Any
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from .archive import ArchiveStore
+from .catalog import IweCatalog
 from .config import Settings
 from .index import RetrievalIndex
 from .models import SourceConfig
+from .projection import SkillProjection
 from .refresh import (
     SourceRefreshWatcher,
     external_watcher_snapshot,
@@ -21,6 +23,7 @@ from .sources import (
     skill_catalog,
     workflow_catalog,
 )
+from .scout import RetrievalScout
 
 
 class RetrievalService:
@@ -29,6 +32,9 @@ class RetrievalService:
         self.sources = self.settings.sources()
         self.archive = ArchiveStore(self.settings.archive_db)
         self.index = RetrievalIndex(self.settings)
+        self.catalog = IweCatalog(self.settings, self.sources)
+        self.projections = SkillProjection(self.settings)
+        self.scout = RetrievalScout(self.settings)
         self._write_mutex = threading.RLock()
         self._watcher: SourceRefreshWatcher | None = None
 
@@ -87,6 +93,21 @@ class RetrievalService:
         for row in result.get("sources", []):
             source = by_name[str(row["name"])]
             checkpoint = checkpoints.get(source.name)
+            catalog_only = source.kind == "skills" and source.state == "native"
+            if not source.enabled or catalog_only:
+                row["checkpoint"] = checkpoint or {}
+                row["index_health"] = {
+                    "current": True,
+                    "reasons": [],
+                    "lanes": row.get("lanes", {}),
+                }
+                row["managed"] = False
+                row["management"] = (
+                    "catalog-reference" if catalog_only else "disabled"
+                )
+                row["stale"] = False
+                row["stale_reasons"] = []
+                continue
             reasons: list[str] = []
             current_fingerprint = ""
             fingerprint_error = ""
@@ -121,6 +142,7 @@ class RetrievalService:
                 "fingerprint_error": fingerprint_error,
             }
             row["index_health"] = health
+            row["managed"] = True
             row["stale"] = bool(reasons)
             row["stale_reasons"] = list(dict.fromkeys(reasons))
         result["archive"] = {
@@ -135,6 +157,8 @@ class RetrievalService:
             "checkpoints": checkpoints,
         }
         result["watcher"] = watcher
+        result["catalog"] = self.catalog.stats()
+        result["projections"] = self.projections.list()
         return result
 
     def sync(
@@ -145,7 +169,12 @@ class RetrievalService:
         only_if_stale: bool = False,
         lock_timeout: float | None = None,
     ) -> dict[str, Any]:
-        selected = self._selected(names=names)
+        configured_selected = self._selected(names=names)
+        selected = [
+            source
+            for source in configured_selected
+            if not (source.kind == "skills" and source.state == "native")
+        ]
         unavailable = [
             source.name
             for source in self._selected(names=names, require_available=False)
@@ -174,8 +203,21 @@ class RetrievalService:
             }
         reports = []
         skipped = []
+        catalog_report: dict[str, Any] | None = None
+        pruned_unmanaged: list[dict[str, Any]] = []
         try:
             with self._write_mutex:
+                pruned_unmanaged = self.index.prune_unmanaged(self.sources)
+                skipped.extend(
+                    {
+                        "source": source.name,
+                        "kind": source.kind,
+                        "fingerprint": "",
+                        "reason": "native_catalog_only",
+                    }
+                    for source in configured_selected
+                    if source.kind == "skills" and source.state == "native"
+                )
                 for source in selected:
                     fingerprint = ""
                     try:
@@ -248,6 +290,14 @@ class RetrievalService:
                                 "error": error,
                             }
                         )
+                if any(source.kind == "skills" for source in configured_selected):
+                    try:
+                        catalog_report = self.catalog.sync()
+                    except Exception as exc:
+                        catalog_report = {
+                            "root": str(self.settings.catalog_root),
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
         finally:
             lock.release()
         return {
@@ -255,6 +305,8 @@ class RetrievalService:
             "synced": reports,
             "skipped": skipped,
             "unavailable": unavailable,
+            "catalog": catalog_report,
+            "pruned_unmanaged": pruned_unmanaged,
             "lock": {
                 "path": str(self.settings.sync_lock_path),
                 "acquired": True,
@@ -262,49 +314,183 @@ class RetrievalService:
             },
         }
 
-    def find_skills(self, query: str, limit: int = 8) -> dict[str, Any]:
+    def search_skills(self, query: str, limit: int = 8) -> dict[str, Any]:
+        """Fuse semantic Chroma ranking with IWE fuzzy/BM25 graph search."""
+
+        query = query.strip()
+        if not query:
+            raise ValueError("search query must not be empty")
         limit = max(1, min(limit, 20))
-        hits = self.index.search(
+        entries = self.catalog.entries()
+        semantic = self.index.search(
             query,
-            self._selected(kinds={"skills"}),
-            limit=max(limit * 3, limit),
+            [
+                source
+                for source in self._selected(kinds={"skills"})
+                if source.state in {"cold", "archived"}
+            ],
+            limit=max(limit * 8, 40),
         )
-        rows = []
-        seen: set[str] = set()
+        iwe = self.catalog.find(
+            query,
+            limit=max(limit * 4, 20),
+            states={"cold", "archived"},
+        )
+        ranked: dict[str, dict[str, Any]] = {}
+
+        def row_for(item_id: str) -> dict[str, Any] | None:
+            entry = entries.get(item_id)
+            if not entry or entry.get("state") not in {"cold", "archived"}:
+                return None
+            return ranked.setdefault(
+                item_id,
+                {
+                    "skill_id": item_id,
+                    "name": entry["title"],
+                    "description": entry.get("description", ""),
+                    "repository": entry["source"],
+                    "state": entry["state"],
+                    "categories": entry.get("categories", []),
+                    "path": entry["canonical_path"],
+                    "rank_score": 0.0,
+                    "semantic_rank": None,
+                    "semantic_score": None,
+                    "iwe_rank": None,
+                },
+            )
+
+        seen_semantic: set[str] = set()
+        semantic_rank = 0
+        for hit in semantic:
+            item_id = str(hit.metadata.get("skill_id") or "")
+            if not item_id or item_id in seen_semantic:
+                continue
+            seen_semantic.add(item_id)
+            row = row_for(item_id)
+            if row is None:
+                continue
+            semantic_rank += 1
+            row["semantic_rank"] = semantic_rank
+            row["semantic_score"] = round(hit.score, 6)
+            row["rank_score"] += 1.0 / (60 + semantic_rank)
+
+        for match in iwe:
+            item_id = str(match["item_id"])
+            row = row_for(item_id)
+            if row is None:
+                continue
+            iwe_rank = int(match["iwe_rank"])
+            row["iwe_rank"] = iwe_rank
+            row["rank_score"] += 1.0 / (60 + iwe_rank)
+
+        normalized_query = query.casefold()
+        query_terms = set(normalized_query.split())
+        for row in ranked.values():
+            name = str(row["name"]).casefold()
+            if normalized_query == name:
+                row["rank_score"] += 0.02
+            elif query_terms and query_terms.issubset(set(name.split())):
+                row["rank_score"] += 0.005
+
+        rows = sorted(
+            ranked.values(),
+            key=lambda row: (-float(row["rank_score"]), str(row["name"]).casefold()),
+        )
+        deduped = []
         seen_paths: set[str] = set()
         seen_names: set[str] = set()
-        for hit in hits:
-            skill_id = str(hit.metadata.get("skill_id") or "")
-            canonical_path = str(Path(hit.locator).resolve(strict=False))
-            normalized_name = hit.title.strip().casefold()
-            if (
-                not skill_id
-                or skill_id in seen
-                or canonical_path in seen_paths
-                or normalized_name in seen_names
-            ):
+        peak = float(rows[0]["rank_score"]) if rows else 1.0
+        for row in rows:
+            canonical = str(Path(row["path"]).resolve(strict=False))
+            name = str(row["name"]).strip().casefold()
+            if canonical in seen_paths or name in seen_names:
                 continue
-            seen.add(skill_id)
-            seen_paths.add(canonical_path)
-            seen_names.add(normalized_name)
-            rows.append(
-                {
-                    "skill_id": skill_id,
-                    "name": hit.title,
-                    "description": str(hit.metadata.get("description") or ""),
-                    "repository": hit.source_name,
-                    "path": hit.locator,
-                    "score": round(hit.score, 4),
-                    "lane": hit.lane,
-                }
-            )
-            if len(rows) >= limit:
+            seen_paths.add(canonical)
+            seen_names.add(name)
+            row["score"] = round(float(row.pop("rank_score")) / peak, 6)
+            deduped.append(row)
+            if len(deduped) >= limit:
                 break
         return {
             "query": query,
-            "matches": rows,
-            "instruction": "Call load_skills only for the selected skill IDs; multiple IDs are supported.",
+            "matches": deduped,
+            "ranking": "Chroma semantic + IWE fuzzy/BM25 reciprocal-rank fusion",
         }
+
+    def _scout_read(self, skill_id: str) -> dict[str, Any]:
+        context = self.catalog.context(skill_id)
+        entry = context["entry"]
+        content = Path(entry["canonical_path"]).read_text(
+            encoding="utf-8", errors="replace"
+        )
+        return {
+            "skill_id": skill_id,
+            "name": entry["title"],
+            "description": entry.get("description", ""),
+            "state": entry["state"],
+            "categories": entry.get("categories", []),
+            "canonical_excerpt": content[:12000],
+            "iwe_graph": context["graph"],
+        }
+
+    def retrieve_skill(self, query: str) -> dict[str, Any]:
+        """Delegate selection, return exact instructions, and project the package."""
+
+        selection = self.scout.select(
+            query,
+            search=lambda value, limit: self.search_skills(value, limit)["matches"],
+            read=self._scout_read,
+        )
+        skill_id = selection.get("selected_id")
+        if not skill_id:
+            return {
+                "query": query,
+                "selection": selection,
+                "skill": None,
+                "projection": None,
+            }
+        entry = self.catalog.entry(str(skill_id))
+        if entry["state"] not in {"cold", "archived"}:
+            raise RuntimeError("Retrieval Scout may project only cold or archived skills")
+        canonical = Path(entry["canonical_path"])
+        content = canonical.read_text(encoding="utf-8", errors="replace")
+        projection = self.projections.project(entry)
+        return {
+            "query": query,
+            "selection": selection,
+            "skill": {
+                "skill_id": skill_id,
+                "name": entry["title"],
+                "source": entry["source"],
+                "state": entry["state"],
+                "canonical_path": str(canonical),
+                "content": content,
+                "verbatim": True,
+            },
+            "projection": projection,
+            "instruction": (
+                "Use the returned SKILL.md immediately. The complete package is also "
+                "projected for durable discovery; run /reload-skills in Hermes or "
+                "/reload in OMP to refresh the current process without restarting."
+            ),
+        }
+
+    def list_retrieved_skills(self) -> dict[str, Any]:
+        return self.projections.list()
+
+    def clear_retrieved_skills(
+        self,
+        skill_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self.projections.clear(skill_ids)
+
+    def find_skills(self, query: str, limit: int = 8) -> dict[str, Any]:
+        result = self.search_skills(query, limit)
+        result["instruction"] = (
+            "Compatibility search only. MCP callers should use retrieve_skill, which "
+            "delegates selection and projects one complete skill safely."
+        )
+        return result
 
     def load_skills(self, skill_ids: list[str]) -> dict[str, Any]:
         requested = list(dict.fromkeys(skill_ids))
