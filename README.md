@@ -73,9 +73,10 @@ cd retrieval
 ./setup.sh
 ```
 
-`setup.sh` creates `.env` and `sources.toml` only when missing, creates the
-uv-managed `.venv`, installs IWE when needed, builds the catalog, and runs the
-idempotent harness integration. Review the local files before starting:
+`setup.sh` creates `.env`, `sources.toml`, and `category-overrides.toml` only
+when missing, creates the persistent `~/Hermes/skill-library` intake root, builds
+the uv-managed `.venv`, installs IWE when needed, builds the catalog, and runs
+the idempotent harness integration. Review the local files before starting:
 
 ```bash
 ${EDITOR:-vi} .env
@@ -107,6 +108,64 @@ the shared projection root to Hermes `skills.external_dirs` and OMP
 `skills.customDirectories`. It also prepares a Retrieval-owned OMP profile with
 the configured model/provider but no inherited MCPs or agent extensions. The
 command is idempotent and does not require a gateway restart.
+
+## Maintaining specialist skill libraries
+
+The easiest future intake is a clone beneath the one configured pointer root:
+
+```bash
+git clone https://github.com/example/security-skills.git \
+  ~/Hermes/skill-library/security-skills
+.venv/bin/hermes-retrieval catalog audit
+```
+
+The persistent watcher already follows that root recursively. A new or edited
+`SKILL.md` is categorized, reduced to its compact descriptor, and synchronized
+without polling on searches. No separate source entry or MCP restart is needed.
+
+Categorization is intentionally conservative:
+
+- `taxonomy.toml` is the committed, stable category vocabulary. Existing IDs do
+  not change as new libraries arrive;
+- a skill may explicitly declare `retrieval_categories` in its frontmatter;
+- `category-overrides.toml` is the ignored, human-owned assignment layer for
+  upstream repositories that should remain untouched;
+- keyword matches may assign only categories already present in the taxonomy;
+- a skill with no approved category enters the review queue and is excluded from
+  both IWE and Chroma. Retrieval never invents a category automatically.
+
+An exact override looks like this:
+
+```toml
+[skills]
+"security-skills:skills/packet-hunter" = ["cybersecurity", "network-security"]
+```
+
+If no existing category is accurate, deliberately append a new
+`[[categories]]` table to `taxonomy.toml`, add the exact override, then run:
+
+```bash
+.venv/bin/hermes-retrieval catalog audit
+.venv/bin/hermes-retrieval sync skill-intake
+```
+
+To inspect a directory without moving or registering it:
+
+```bash
+.venv/bin/hermes-retrieval catalog audit /path/to/skills --name future-skills
+```
+
+To keep an approved tree at an arbitrary location, preview and then register it:
+
+```bash
+.venv/bin/hermes-retrieval catalog register future-skills /path/to/skills --dry-run
+.venv/bin/hermes-retrieval catalog register future-skills /path/to/skills
+```
+
+Registration refuses any pending review, appends only one explicit local source,
+synchronizes it, and restarts the watcher when that user service is active. These
+maintenance operations are human-only CLI functions and are never exposed by the
+Retrieval MCP.
 
 ## MCP surface
 
@@ -143,6 +202,7 @@ Administrative commands are explicit:
 .venv/bin/hermes-retrieval projected clear
 .venv/bin/hermes-retrieval catalog sync
 .venv/bin/hermes-retrieval catalog stats
+.venv/bin/hermes-retrieval catalog audit
 .venv/bin/hermes-retrieval integrate
 .venv/bin/hermes-retrieval status
 .venv/bin/hermes-retrieval sync
@@ -168,8 +228,8 @@ never operate on a fuzzy match.
   profile are disabled.
 - Network requests are limited to the configured Chroma/model endpoints and
   user-invoked package installation/update sources.
-- `.env`, `sources.toml`, local databases, generated catalogs, projections,
-  caches, and the uv environment are excluded from Git.
+- `.env`, `sources.toml`, `category-overrides.toml`, local databases, generated
+  catalogs, projections, caches, and the uv environment are excluded from Git.
 
 ## Update and development
 

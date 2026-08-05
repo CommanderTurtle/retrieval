@@ -8,3 +8,4 @@ dist/
 *.egg-info/
 *.py[cod]
 sources.toml
+category-overrides.toml

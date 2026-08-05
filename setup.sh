@@ -31,6 +31,9 @@ fi
 if [[ ! -f sources.toml ]]; then
   cp -- sources.example.toml sources.toml
 fi
+if [[ ! -f category-overrides.toml ]]; then
+  cp -- category-overrides.example.toml category-overrides.toml
+fi
 
 if [[ -e .venv && ! -f .venv/pyvenv.cfg ]]; then
   printf '.venv exists but is not a Python virtual environment.\n' >&2
@@ -48,7 +51,7 @@ venv_python="$root/.venv/bin/python"
   exit 1
 }
 "$uv_bin" sync --frozen --python "$venv_python"
-"$venv_python" -c 'from hermes_retrieval.config import Settings; Settings.load().skill_archive_root.mkdir(parents=True, exist_ok=True)'
+"$venv_python" -c 'from hermes_retrieval.config import Settings; s = Settings.load(); s.skill_archive_root.mkdir(parents=True, exist_ok=True); s.skill_intake_root.mkdir(parents=True, exist_ok=True)'
 "$venv_python" -m hermes_retrieval.cli catalog sync
 "$venv_python" -m hermes_retrieval.cli integrate
 

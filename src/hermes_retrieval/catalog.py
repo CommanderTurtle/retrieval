@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -16,36 +17,12 @@ import yaml
 from .config import Settings
 from .models import SourceConfig
 from .sources import iter_skills
+from .taxonomy import Taxonomy, load_category_overrides, load_taxonomy
 
 
 _MANIFEST = ".retrieval-catalog.json"
-_MANIFEST_VERSION = 1
+_MANIFEST_VERSION = 2
 _STATE_PRIORITY = {"archived": 1, "cold": 2, "native": 3}
-_CATEGORY_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("cybersecurity", ("cybersecurity", "security skill")),
-    ("cloud-security", ("aws", "azure", "gcp", "cloud security", "iam")),
-    ("identity-access", ("identity", "oauth", "saml", "credential", "access control")),
-    ("detection-hunting", ("threat hunt", "detection", "siem", "yara", "sigma")),
-    ("incident-response-forensics", ("incident response", "forensic", "dfir")),
-    ("application-security", ("appsec", "web security", "owasp", "vulnerability")),
-    ("network-security", ("network", "firewall", "packet", "dns", "tls")),
-    ("endpoint-windows", ("endpoint", "windows", "active directory", "powershell")),
-    ("containers-kubernetes", ("container", "docker", "kubernetes", "k8s")),
-    ("ot-ics", ("industrial control", "ics", "scada", "operational technology")),
-    ("malware", ("malware", "reverse engineering", "ransomware")),
-    ("governance-compliance", ("compliance", "governance", "audit", "policy")),
-    ("offensive-security", ("penetration", "red team", "exploit", "offensive")),
-    ("hardening", ("hardening", "secure configuration", "baseline")),
-    ("software-development", ("code", "software", "programming", "developer")),
-    ("web", ("browser", "website", "html", "css", "frontend", "web")),
-    ("data", ("database", "sql", "spreadsheet", "data")),
-    ("infrastructure", ("linux", "server", "infrastructure", "devops", "systemd")),
-    ("research", ("research", "paper", "search", "citation")),
-    ("media", ("image", "video", "audio", "media", "design")),
-    ("communications", ("email", "slack", "discord", "signal", "communication")),
-    ("agents", ("agent", "mcp", "prompt", "model", "llm")),
-    ("productivity", ("workflow", "productivity", "document", "planning")),
-)
 
 
 def _slug(value: str, fallback: str = "item") -> str:
@@ -76,11 +53,14 @@ def _as_terms(value: Any) -> list[str]:
 
 def _classification(
     *,
+    item_id: str,
     source: SourceConfig,
     title: str,
     relative_path: str,
     description: str,
     text: str,
+    taxonomy: Taxonomy,
+    overrides: dict[str, list[str]],
 ) -> tuple[list[str], list[str]]:
     payload = _frontmatter_payload(text)
     explicit: list[str] = []
@@ -89,16 +69,18 @@ def _classification(
     tags = list(
         dict.fromkeys(_slug(item, "uncategorized") for item in explicit)
     )[:12]
+    if item_id in overrides:
+        return list(overrides[item_id]), tags
+    declared = _as_terms(payload.get("retrieval_categories"))
+    if declared:
+        return taxonomy.validate(
+            declared,
+            owner=f"SKILL.md retrieval_categories for {item_id!r}",
+        )[:8], tags
     haystack = " ".join(
         (source.name, title, relative_path, description, text[:5000])
-    ).casefold()
-    result = []
-    for category, needles in _CATEGORY_RULES:
-        if any(needle in haystack for needle in needles):
-            result.append(category)
-    if not result:
-        result.append("uncategorized")
-    return list(dict.fromkeys(result))[:8], tags
+    )
+    return taxonomy.classify(haystack), tags
 
 
 def _safe_owned_path(root: Path, relative: str) -> Path:
@@ -135,6 +117,16 @@ class IweCatalog:
         self.root = settings.catalog_root
         self.manifest_path = self.root / _MANIFEST
 
+    def _policy(self) -> tuple[Taxonomy, dict[str, list[str]]]:
+        # Policy is deliberately reloaded on every administrative/watcher sync.
+        # A human can review an intake, edit an override, and sync without
+        # restarting a long-lived watcher process.
+        taxonomy = load_taxonomy(self.settings.taxonomy_file)
+        return taxonomy, load_category_overrides(
+            self.settings.category_overrides_file,
+            taxonomy,
+        )
+
     def _iwe(self) -> str:
         configured = os.path.expanduser(self.settings.iwe_command)
         if os.path.sep in configured:
@@ -153,16 +145,27 @@ class IweCatalog:
         try:
             payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return {"version": _MANIFEST_VERSION, "entries": {}, "owned_files": []}
+            return {
+                "version": _MANIFEST_VERSION,
+                "entries": {},
+                "review": {},
+                "owned_files": [],
+            }
         if (
             not isinstance(payload, dict)
             or payload.get("version") != _MANIFEST_VERSION
             or not isinstance(payload.get("entries"), dict)
         ):
-            return {"version": _MANIFEST_VERSION, "entries": {}, "owned_files": []}
+            return {
+                "version": _MANIFEST_VERSION,
+                "entries": {},
+                "review": {},
+                "owned_files": [],
+            }
         return payload
 
-    def _entries(self) -> tuple[dict[str, dict[str, Any]], int]:
+    def _inventory(self) -> dict[str, Any]:
+        taxonomy, overrides = self._policy()
         candidates: list[dict[str, Any]] = []
         for source in self.sources:
             if not source.enabled or source.kind != "skills" or not source.path.is_dir():
@@ -175,11 +178,14 @@ class IweCatalog:
                 )
                 relative_path = str(document.metadata.get("relative_path") or "")
                 categories, tags = _classification(
+                    item_id=item_id,
                     source=source,
                     title=document.title,
                     relative_path=relative_path,
                     description=str(document.metadata.get("description") or ""),
                     text=text,
+                    taxonomy=taxonomy,
+                    overrides=overrides,
                 )
                 stem = _slug(document.title, _slug(Path(canonical_path).parent.name))
                 digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:8]
@@ -239,7 +245,79 @@ class IweCatalog:
             for entry in by_title.values()
             if entry["state"] in {"cold", "archived"}
         }
-        return dict(sorted(dormant.items())), native_excluded
+        entries = {
+            item_id: entry
+            for item_id, entry in dormant.items()
+            if entry["categories"]
+        }
+        review = {
+            item_id: {
+                **entry,
+                "review_reason": "no-approved-category",
+            }
+            for item_id, entry in dormant.items()
+            if not entry["categories"]
+        }
+        return {
+            "entries": dict(sorted(entries.items())),
+            "review": dict(sorted(review.items())),
+            "native_excluded": native_excluded,
+            "duplicates_excluded": len(candidates) - len(by_title),
+        }
+
+    def audit(self) -> dict[str, Any]:
+        inventory = self._inventory()
+        entries = inventory["entries"]
+        review = inventory["review"]
+        category_counts = Counter(
+            category
+            for entry in entries.values()
+            for category in entry["categories"]
+        )
+        source_counts = Counter(entry["source"] for entry in entries.values())
+        return {
+            "total": len(entries) + len(review),
+            "approved": len(entries),
+            "review_required": len(review),
+            "native_excluded": inventory["native_excluded"],
+            "duplicates_excluded": inventory["duplicates_excluded"],
+            "categories": dict(sorted(category_counts.items())),
+            "sources": dict(sorted(source_counts.items())),
+            "review": [
+                {
+                    "skill_id": item_id,
+                    "name": entry["title"],
+                    "source": entry["source"],
+                    "path": entry["canonical_path"],
+                    "tags": entry["tags"],
+                    "reason": entry["review_reason"],
+                }
+                for item_id, entry in review.items()
+            ],
+        }
+
+    def audit_path(self, path: Path, name: str) -> dict[str, Any]:
+        candidate_path = path.expanduser().resolve()
+        if not candidate_path.is_dir():
+            raise ValueError(f"skill intake path is not a directory: {candidate_path}")
+        if not any(candidate_path.rglob("SKILL.md")):
+            raise ValueError(f"skill intake path contains no SKILL.md: {candidate_path}")
+        candidate = SourceConfig(
+            name=name,
+            kind="skills",
+            path=candidate_path,
+            enabled=True,
+            state="cold",
+        )
+        native = [
+            source
+            for source in self.sources
+            if source.enabled and source.kind == "skills" and source.state == "native"
+        ]
+        report = IweCatalog(self.settings, [*native, candidate]).audit()
+        report["path"] = str(candidate_path)
+        report["name"] = name
+        return report
 
     @staticmethod
     def _card(entry: dict[str, Any]) -> str:
@@ -277,7 +355,10 @@ class IweCatalog:
     def sync(self) -> dict[str, Any]:
         self.root.mkdir(parents=True, exist_ok=True)
         previous = self.manifest()
-        entries, native_excluded = self._entries()
+        inventory = self._inventory()
+        entries = inventory["entries"]
+        review = inventory["review"]
+        native_excluded = inventory["native_excluded"]
         owned: set[str] = set()
         changed = 0
 
@@ -372,7 +453,9 @@ class IweCatalog:
             "version": _MANIFEST_VERSION,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "entries": entries,
+            "review": review,
             "native_excluded": native_excluded,
+            "duplicates_excluded": inventory["duplicates_excluded"],
             "owned_files": sorted(owned),
         }
         changed += int(
@@ -402,7 +485,9 @@ class IweCatalog:
         return {
             "root": str(self.root),
             "entries": len(entries),
+            "review_required": len(review),
             "native_excluded": native_excluded,
+            "duplicates_excluded": inventory["duplicates_excluded"],
             "cold": sum(row["state"] == "cold" for row in entries.values()),
             "archived": sum(row["state"] == "archived" for row in entries.values()),
             "files_changed": changed,
@@ -524,11 +609,14 @@ class IweCatalog:
     def stats(self) -> dict[str, Any]:
         manifest = self.manifest()
         entries = list(manifest.get("entries", {}).values())
+        review = list(manifest.get("review", {}).values())
         return {
             "root": str(self.root),
             "initialized": (self.root / ".iwe" / "config.toml").is_file(),
             "entries": len(entries),
+            "review_required": len(review),
             "native_excluded": int(manifest.get("native_excluded") or 0),
+            "duplicates_excluded": int(manifest.get("duplicates_excluded") or 0),
             "states": {
                 state: sum(row.get("state") == state for row in entries)
                 for state in ("native", "cold", "archived")

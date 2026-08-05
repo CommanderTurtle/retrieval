@@ -34,6 +34,15 @@ path = "${RETRIEVAL_SKILL_ARCHIVE}"
 enabled = true
 state = "archived"
 
+# Persistent human-owned intake. Clone any future specialist skill repository
+# below this directory; the watcher sees nested SKILL.md changes automatically.
+[[sources]]
+name = "skill-intake"
+kind = "skills"
+path = "${RETRIEVAL_SKILL_INTAKE}"
+enabled = true
+state = "cold"
+
 [[sources]]
 name = "agent-skills"
 kind = "skills"

@@ -1,0 +1,6 @@
+# This file is local human-owned policy and is never exposed through MCP.
+# Copy it to category-overrides.toml. Keys are exact Retrieval skill IDs.
+# Every value must name one or more IDs already declared in taxonomy.toml.
+
+[skills]
+# "future-security-repo:skills/example" = ["cybersecurity", "network-security"]

@@ -208,6 +208,17 @@ class RetrievalService:
         try:
             with self._write_mutex:
                 pruned_unmanaged = self.index.prune_unmanaged(self.sources)
+                approved_skill_ids: set[str] | None = set()
+                if any(source.kind == "skills" for source in configured_selected):
+                    try:
+                        catalog_report = self.catalog.sync()
+                        approved_skill_ids = set(self.catalog.entries())
+                    except Exception as exc:
+                        approved_skill_ids = None
+                        catalog_report = {
+                            "root": str(self.settings.catalog_root),
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
                 skipped.extend(
                     {
                         "source": source.name,
@@ -219,6 +230,16 @@ class RetrievalService:
                     if source.kind == "skills" and source.state == "native"
                 )
                 for source in selected:
+                    if source.kind == "skills" and approved_skill_ids is None:
+                        skipped.append(
+                            {
+                                "source": source.name,
+                                "kind": source.kind,
+                                "fingerprint": "",
+                                "reason": "catalog_unavailable",
+                            }
+                        )
+                        continue
                     fingerprint = ""
                     try:
                         fingerprint = source_fingerprint(source)
@@ -245,6 +266,13 @@ class RetrievalService:
                             )
                             continue
                         current = list(iter_documents(source, self.settings))
+                        if source.kind == "skills":
+                            current = [
+                                document
+                                for document in current
+                                if str(document.metadata.get("skill_id") or "")
+                                in approved_skill_ids
+                            ]
                         archive_report = self.archive.sync(
                             source,
                             current,
@@ -290,14 +318,6 @@ class RetrievalService:
                                 "error": error,
                             }
                         )
-                if any(source.kind == "skills" for source in configured_selected):
-                    try:
-                        catalog_report = self.catalog.sync()
-                    except Exception as exc:
-                        catalog_report = {
-                            "root": str(self.settings.catalog_root),
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
         finally:
             lock.release()
         return {

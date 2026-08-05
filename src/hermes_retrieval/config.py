@@ -95,6 +95,9 @@ class Settings:
     max_skill_chars: int
     max_total_skill_chars: int
     max_recall_chars: int
+    taxonomy_file: Path
+    category_overrides_file: Path
+    skill_intake_root: Path
     catalog_root: Path
     projection_root: Path
     iwe_command: str
@@ -186,6 +189,38 @@ class Settings:
             max_skill_chars=max(1000, _int_env("RETRIEVAL_MAX_SKILL_CHARS", 60000)),
             max_total_skill_chars=max(2000, _int_env("RETRIEVAL_MAX_TOTAL_SKILL_CHARS", 120000)),
             max_recall_chars=max(1000, _int_env("RETRIEVAL_MAX_RECALL_CHARS", 8000)),
+            taxonomy_file=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_TAXONOMY_FILE",
+                            "",
+                        ).strip()
+                        or str(project_root / "taxonomy.toml")
+                    )
+                )
+            ).resolve(),
+            category_overrides_file=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_CATEGORY_OVERRIDES",
+                            "",
+                        ).strip()
+                        or str(project_root / "category-overrides.toml")
+                    )
+                )
+            ).resolve(),
+            skill_intake_root=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_SKILL_INTAKE",
+                            "~/Hermes/skill-library",
+                        )
+                    )
+                )
+            ).absolute(),
             catalog_root=Path(
                 os.path.expandvars(
                     os.path.expanduser(

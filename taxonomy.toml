@@ -1,0 +1,121 @@
+version = 1
+
+# Category IDs are a stable public vocabulary for the generated catalog.
+# Never rename or delete an existing ID casually: local overrides and projected
+# catalog cards may refer to it. Add a new category only when no existing
+# category accurately describes a reviewed skill.
+
+[[categories]]
+id = "cybersecurity"
+label = "Cybersecurity"
+keywords = ["cybersecurity", "security skill"]
+
+[[categories]]
+id = "cloud-security"
+label = "Cloud Security"
+keywords = ["aws", "azure", "gcp", "cloud security", "iam"]
+
+[[categories]]
+id = "identity-access"
+label = "Identity and Access"
+keywords = ["identity", "oauth", "saml", "credential", "access control"]
+
+[[categories]]
+id = "detection-hunting"
+label = "Detection and Hunting"
+keywords = ["threat hunt", "detection", "siem", "yara", "sigma"]
+
+[[categories]]
+id = "incident-response-forensics"
+label = "Incident Response and Forensics"
+keywords = ["incident response", "forensic", "dfir"]
+
+[[categories]]
+id = "application-security"
+label = "Application Security"
+keywords = ["appsec", "web security", "owasp", "vulnerability"]
+
+[[categories]]
+id = "network-security"
+label = "Network Security"
+keywords = ["network", "firewall", "packet", "dns", "tls"]
+
+[[categories]]
+id = "endpoint-windows"
+label = "Endpoint and Windows"
+keywords = ["endpoint", "windows", "active directory", "powershell"]
+
+[[categories]]
+id = "containers-kubernetes"
+label = "Containers and Kubernetes"
+keywords = ["container", "docker", "kubernetes", "k8s"]
+
+[[categories]]
+id = "ot-ics"
+label = "OT and ICS"
+keywords = ["industrial control", "ics", "scada", "operational technology"]
+
+[[categories]]
+id = "malware"
+label = "Malware"
+keywords = ["malware", "reverse engineering", "ransomware"]
+
+[[categories]]
+id = "governance-compliance"
+label = "Governance and Compliance"
+keywords = ["compliance", "governance", "audit", "policy"]
+
+[[categories]]
+id = "offensive-security"
+label = "Offensive Security"
+keywords = ["penetration", "red team", "exploit", "offensive"]
+
+[[categories]]
+id = "hardening"
+label = "Hardening"
+keywords = ["hardening", "secure configuration", "baseline"]
+
+[[categories]]
+id = "software-development"
+label = "Software Development"
+keywords = ["code", "software", "programming", "developer"]
+
+[[categories]]
+id = "web"
+label = "Web"
+keywords = ["browser", "website", "html", "css", "frontend", "web"]
+
+[[categories]]
+id = "data"
+label = "Data"
+keywords = ["database", "sql", "spreadsheet", "data"]
+
+[[categories]]
+id = "infrastructure"
+label = "Infrastructure"
+keywords = ["linux", "server", "infrastructure", "devops", "systemd"]
+
+[[categories]]
+id = "research"
+label = "Research"
+keywords = ["research", "paper", "search", "citation"]
+
+[[categories]]
+id = "media"
+label = "Media"
+keywords = ["image", "video", "audio", "media", "design"]
+
+[[categories]]
+id = "communications"
+label = "Communications"
+keywords = ["email", "slack", "discord", "signal", "communication"]
+
+[[categories]]
+id = "agents"
+label = "Agents"
+keywords = ["agent", "mcp", "prompt", "model", "llm"]
+
+[[categories]]
+id = "productivity"
+label = "Productivity"
+keywords = ["workflow", "productivity", "document", "planning"]

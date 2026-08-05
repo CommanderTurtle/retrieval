@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from pathlib import Path
+import re
 import signal
 import sys
 import threading
@@ -12,6 +14,7 @@ from .config import Settings
 from .projection import SkillProjection, integrate_harnesses
 from .service import RetrievalService
 from .skill_admin import SkillAdmin, SkillAdminError
+from .source_admin import SourceRegistry
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -43,6 +46,23 @@ def _parser() -> argparse.ArgumentParser:
     catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
     catalog_commands.add_parser("sync")
     catalog_commands.add_parser("stats")
+    catalog_audit = catalog_commands.add_parser(
+        "audit",
+        help="review category assignments without changing sources or MCP tools",
+    )
+    catalog_audit.add_argument("path", nargs="?")
+    catalog_audit.add_argument("--name")
+    catalog_audit.add_argument("--json", action="store_true", dest="as_json")
+    catalog_register = catalog_commands.add_parser(
+        "register",
+        help="register and synchronize a reviewed external skill directory",
+    )
+    catalog_register.add_argument("name")
+    catalog_register.add_argument("path")
+    catalog_register.add_argument(
+        "--state", choices=["cold", "archived"], default="cold"
+    )
+    catalog_register.add_argument("--dry-run", action="store_true")
     sub.add_parser(
         "integrate",
         help="register the shared projection directory with Hermes and OMP",
@@ -186,6 +206,31 @@ def _run_watcher() -> None:
             signal.signal(signum, handler)
 
 
+def _print_catalog_audit(report: dict[str, object]) -> None:
+    print(
+        "Catalog audit: "
+        f"{report['approved']} approved, "
+        f"{report['review_required']} require review, "
+        f"{report['native_excluded']} native exclusions."
+    )
+    categories = report.get("categories") or {}
+    if isinstance(categories, dict) and categories:
+        print("Categories:")
+        for category, count in categories.items():
+            print(f"  {category}: {count}")
+    review = report.get("review") or []
+    if isinstance(review, list) and review:
+        print("Review required (not graphed or vectorized):")
+        for row in review:
+            if not isinstance(row, dict):
+                continue
+            print(f"  {row['skill_id']}\n    {row['path']}")
+        print(
+            "Add exact IDs to category-overrides.toml using categories from "
+            "taxonomy.toml, then rerun catalog audit and sync."
+        )
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -210,11 +255,32 @@ def main() -> None:
     if args.command == "catalog":
         settings = Settings.load()
         catalog = IweCatalog(settings, settings.sources())
-        result = (
-            catalog.sync()
-            if args.catalog_command == "sync"
-            else catalog.stats()
-        )
+        if args.catalog_command == "sync":
+            result = catalog.sync()
+        elif args.catalog_command == "stats":
+            result = catalog.stats()
+        elif args.catalog_command == "audit":
+            if args.path:
+                default_name = re.sub(
+                    r"[^a-z0-9]+", "-", Path(args.path).name.casefold()
+                ).strip("-") or "skill-intake"
+                result = catalog.audit_path(
+                    Path(args.path), args.name or default_name
+                )
+            else:
+                result = catalog.audit()
+            if not args.as_json:
+                _print_catalog_audit(result)
+                return
+        elif args.catalog_command == "register":
+            result = SourceRegistry(settings).register(
+                args.name,
+                Path(args.path),
+                state=args.state,
+                dry_run=args.dry_run,
+            )
+        else:
+            raise AssertionError(args.catalog_command)
         print(json.dumps(result, indent=2, sort_keys=True))
         return
     if args.command == "projected":
