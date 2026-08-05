@@ -1,7 +1,7 @@
 [project]
 name = "hermes-retrieval"
-version = "0.2.0"
-description = "IWE-backed cold-skill retrieval for Hermes and OMP"
+version = "0.3.0"
+description = "IWE-backed dormant skill and reference retrieval for Hermes and OMP"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "AGPL-3.0-only"

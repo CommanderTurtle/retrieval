@@ -90,7 +90,6 @@ class Settings:
     watch_poll_seconds: float
     sync_lock_path: Path
     sync_lock_timeout: float
-    skill_archive_root: Path
     max_skills_per_load: int
     max_skill_chars: int
     max_total_skill_chars: int
@@ -175,16 +174,6 @@ class Settings:
                 0.0,
                 _float_env("RETRIEVAL_SYNC_LOCK_TIMEOUT", 30.0),
             ),
-            skill_archive_root=Path(
-                os.path.expandvars(
-                    os.path.expanduser(
-                        os.getenv(
-                            "RETRIEVAL_SKILL_ARCHIVE",
-                            str(archive_db.parent / "skill-archive"),
-                        )
-                    )
-                )
-            ).absolute(),
             max_skills_per_load=max(1, _int_env("RETRIEVAL_MAX_SKILLS_PER_LOAD", 6)),
             max_skill_chars=max(1000, _int_env("RETRIEVAL_MAX_SKILL_CHARS", 60000)),
             max_total_skill_chars=max(2000, _int_env("RETRIEVAL_MAX_TOTAL_SKILL_CHARS", 120000)),
@@ -311,6 +300,7 @@ class Settings:
                 "workflows",
                 "context_mode",
                 "hermes_sessions",
+                "references",
             }:
                 raise ValueError(f"unsupported source kind {kind!r} for {name}")
             raw_path = os.path.expandvars(os.path.expanduser(str(row["path"])))
@@ -326,10 +316,10 @@ class Settings:
                 )
             else:
                 state = "cold"
-            if state not in {"native", "cold", "archived"}:
+            if state not in {"native", "hidden", "cold", "archived"}:
                 raise ValueError(
                     f"unsupported source state {state!r} for {name}; "
-                    "use native, cold, or archived"
+                    "use native, hidden, cold, or archived"
                 )
             out.append(
                 SourceConfig(

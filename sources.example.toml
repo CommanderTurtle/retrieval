@@ -28,11 +28,20 @@ enabled = true
 state = "native"
 
 [[sources]]
-name = "retrieval-skill-archive"
+name = "hermes-archived-skills"
 kind = "skills"
-path = "${RETRIEVAL_SKILL_ARCHIVE}"
+path = "~/.hermes/skills/.archive"
 enabled = true
 state = "archived"
+
+# OMP-native skills with `hide: true` or `disable-model-invocation: true`
+# become searchable as `hidden`; advertised native skills remain excluded.
+[[sources]]
+name = "omp-user-skills"
+kind = "skills"
+path = "~/.omp/agent/skills"
+enabled = true
+state = "native"
 
 # Persistent human-owned intake. Clone any future specialist skill repository
 # below this directory; the watcher sees nested SKILL.md changes automatically.
@@ -41,6 +50,16 @@ name = "skill-intake"
 kind = "skills"
 path = "${RETRIEVAL_SKILL_INTAKE}"
 enabled = true
+state = "cold"
+
+# Optional long-form material extracted deliberately from AGENTS/RULES files.
+# Retrieval indexes one document per Markdown heading. Active context files are
+# never mirrored automatically because both harnesses already own them.
+[[sources]]
+name = "reference-library"
+kind = "references"
+path = "${RETRIEVAL_REFERENCE_ROOT}"
+enabled = false
 state = "cold"
 
 [[sources]]

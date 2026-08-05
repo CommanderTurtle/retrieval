@@ -20,8 +20,9 @@ mcp = FastMCP(
     instructions=(
         "Retrieve at most one specialist skill through an isolated read-only scout. "
         "The exact SKILL.md is returned immediately and its complete package is copied "
-        "only into Retrieval's manifest-owned projection directory. List or clear those "
-        "temporary projections when they are no longer useful."
+        "only into Retrieval's manifest-owned projection directory. Optional reference "
+        "libraries are retrieved separately as bounded heading sections. List or clear "
+        "temporary skill projections when they are no longer useful."
     ),
 )
 
@@ -59,6 +60,25 @@ def clear_retrieved_skills(skill_ids: list[str] | None = None) -> dict:
     """
 
     return _service().clear_retrieved_skills(skill_ids=skill_ids)
+
+
+@mcp.tool()
+def retrieve_reference(
+    query: str,
+    limit: int = 3,
+    max_chars: int = 8000,
+) -> dict:
+    """Retrieve optional reference material as bounded Markdown heading sections.
+
+    Reference sources are explicitly configured and read-only. Active AGENTS,
+    RULES, session context, and tool output are not mirrored automatically.
+    """
+
+    return _service().retrieve_reference(
+        query=query,
+        limit=limit,
+        max_chars=max_chars,
+    )
 
 
 def main() -> None:

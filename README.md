@@ -15,12 +15,15 @@ canonical repository.
 
 ## What Retrieval owns
 
-Retrieval has one intentionally narrow responsibility: cold-skill discovery.
+Retrieval has one intentionally narrow responsibility: dormant knowledge discovery.
 
 - `native` skills already live in a harness-visible tree; their names suppress
   cold duplicates, but they are neither graphed nor embedded as candidates;
+- `hidden` skills are installed OMP skills whose frontmatter deliberately omits
+  them from prompt metadata; Retrieval makes them semantically discoverable;
 - `cold` skills remain only in external repositories until selected;
-- `archived` skills remain discoverable but dormant;
+- `archived` skills remain discoverable but dormant. Hermes owns their lifecycle
+  through `hermes curator`; Retrieval observes `.hermes/skills/.archive` read-only;
 - the generated IWE catalog and Chroma collections are disposable indexes;
 - the projection manifest owns every temporary skill copy it is allowed to
   remove.
@@ -34,7 +37,7 @@ as Retrieval MCP tools.
 
 ## Selection flow
 
-1. Chroma ranks one short descriptor per cold or archived skill semantically.
+1. Chroma ranks one short descriptor per hidden, cold, or archived skill semantically.
 2. IWE performs fuzzy title and BM25 search over the same skills and exposes
    controlled source/category graph links.
 3. Reciprocal-rank fusion produces a bounded candidate list.
@@ -45,8 +48,9 @@ as Retrieval MCP tools.
    capability discovery from importing Zed, Claude, or other user MCP configs.
 5. The scout may select at most one skill. It must first discover and inspect the
    selected ID; otherwise Retrieval fails closed.
-6. Retrieval returns the canonical `SKILL.md` verbatim and atomically projects
-   the full package. Symlinks are skipped and file/byte limits are enforced.
+6. Retrieval returns the canonical `SKILL.md` verbatim. Cold and archived
+   packages are projected atomically; an already-installed hidden skill is not
+   copied. Symlinks are skipped and file/byte limits are enforced.
 
 The IWE tree is derived from configured sources under
 `~/.local/share/hermes-retrieval/catalog`. It contains readable skill cards plus
@@ -57,8 +61,8 @@ a deliberately small category taxonomy; it is not another canonical library.
 - [uv](https://docs.astral.sh/uv/) and Python 3.11 through 3.13;
 - a reachable Chroma server;
 - either an OpenAI-compatible embedding endpoint or the local FastEmbed fallback;
-- [IWE](https://github.com/iwe-org/iwe) (`setup.sh` installs its CLI with Cargo
-  when absent);
+- [IWE](https://github.com/iwe-org/iwe) (`setup.sh` installs only its CLI with
+  Cargo when absent);
 - an existing [oh-my-pi](https://github.com/can1357/oh-my-pi) installation for
   delegated selection.
 
@@ -96,6 +100,13 @@ enabled = true
 state = "native"
 
 [[sources]]
+name = "omp-user-skills"
+kind = "skills"
+path = "~/.omp/agent/skills"
+enabled = true
+state = "native" # per-skill hide frontmatter refines this to hidden
+
+[[sources]]
 name = "specialist-library"
 kind = "skills"
 path = "~/Hermes/specialist-library"
@@ -108,6 +119,16 @@ the shared projection root to Hermes `skills.external_dirs` and OMP
 `skills.customDirectories`. It also prepares a Retrieval-owned OMP profile with
 the configured model/provider but no inherited MCPs or agent extensions. The
 command is idempotent and does not require a gateway restart.
+
+IWE remains an external, local Rust CLI rather than a Python dependency or an
+embedded crate. `catalog stats` reports its exact binary and version. Retrieval
+uses only `iwe find`, `iwe retrieve`, and `iwe init`; it never invokes generated
+agent actions and never updates IWE automatically. A deliberate lifecycle check is:
+
+```bash
+.venv/bin/hermes-retrieval catalog stats
+cargo install iwe --locked --force  # only when you choose to update IWE
+```
 
 ## Maintaining specialist skill libraries
 
@@ -167,15 +188,46 @@ synchronizes it, and restarts the watcher when that user service is active. Thes
 maintenance operations are human-only CLI functions and are never exposed by the
 Retrieval MCP.
 
+## Context files and optional references
+
+Hermes and OMP continue to own active `AGENTS.md`, `RULES.md`, and provider
+context. Retrieval never mirrors them automatically. Audit a repository before
+extracting anything:
+
+```bash
+.venv/bin/hermes-retrieval context audit /path/to/repo
+.venv/bin/hermes-retrieval context audit /path/to/repo \
+  --baseline /path/to/pristine-or-upstream-copy --json
+```
+
+The read-only report includes sizes, estimated prompt tokens, headings, OMP
+`@path` imports, exact duplicates, provider-precedence warnings, and drift from
+an explicit baseline. No universal harness-default `AGENTS.md` exists, so the
+tool never fabricates one and never rewrites a context file.
+
+Keep hard rules, commands, repository conventions, and safety constraints in
+native context. Move only optional history, rationale, inventories, tutorials,
+and long runbooks into an explicitly configured `kind = "references"` Markdown
+source. References are indexed one heading at a time and retrieved with:
+
+```bash
+.venv/bin/hermes-retrieval references "why the storage layout changed"
+```
+
+OMP `@path` imports still expand inline; they organize context but do not reduce
+its prompt cost.
+
 ## MCP surface
 
-The server exposes only three tools:
+The server exposes four narrowly scoped tools:
 
 - `retrieve_skill(query)` searches, inspects, returns, and projects at most one
   specialist skill;
 - `list_retrieved_skills()` reports only Retrieval-owned temporary packages;
 - `clear_retrieved_skills(skill_ids?)` removes selected projections, or all when
-  IDs are omitted.
+  IDs are omitted;
+- `retrieve_reference(query, limit?, max_chars?)` returns bounded, provenance-rich
+  sections from explicitly configured optional reference libraries.
 
 `start.sh` is a stdio MCP process. Register its absolute path with the Hermes MCP
 CLI, then install the small always-on routing skill in the profiles that should
@@ -203,6 +255,8 @@ Administrative commands are explicit:
 .venv/bin/hermes-retrieval catalog sync
 .venv/bin/hermes-retrieval catalog stats
 .venv/bin/hermes-retrieval catalog audit
+.venv/bin/hermes-retrieval context audit /path/to/repo --json
+.venv/bin/hermes-retrieval references "optional architecture rationale"
 .venv/bin/hermes-retrieval integrate
 .venv/bin/hermes-retrieval status
 .venv/bin/hermes-retrieval sync
@@ -210,9 +264,9 @@ Administrative commands are explicit:
 
 The watcher keeps descriptors and the IWE catalog current after source changes;
 search calls do not rescan the filesystem. `sync` remains a recovery/admin
-command. Exact-ID `skills list`, `inspect`, `edit`, `archive`, and `restore`
-commands remain available for deliberate human housekeeping. Archive and restore
-never operate on a fuzzy match.
+command. Exact-ID `skills list`, `inspect`, and `edit` remain available for
+deliberate human housekeeping. Retrieval will not edit harness-owned native or
+archived skills; use the harness's canonical lifecycle command instead.
 
 ## Safety and privacy
 

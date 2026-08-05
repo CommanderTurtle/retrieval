@@ -11,6 +11,7 @@ import threading
 
 from .catalog import IweCatalog
 from .config import Settings
+from .context_audit import audit_context
 from .projection import SkillProjection, integrate_harnesses
 from .service import RetrievalService
 from .skill_admin import SkillAdmin, SkillAdminError
@@ -63,6 +64,22 @@ def _parser() -> argparse.ArgumentParser:
         "--state", choices=["cold", "archived"], default="cold"
     )
     catalog_register.add_argument("--dry-run", action="store_true")
+    context = sub.add_parser("context", help="read-only context-file maintenance")
+    context_commands = context.add_subparsers(dest="context_command", required=True)
+    context_audit = context_commands.add_parser(
+        "audit",
+        help="report context size, precedence, imports, duplicates, and optional drift",
+    )
+    context_audit.add_argument("targets", nargs="*")
+    context_audit.add_argument("--baseline")
+    context_audit.add_argument("--json", action="store_true", dest="as_json")
+    references = sub.add_parser(
+        "references",
+        help="retrieve optional Markdown reference sections without activating rules",
+    )
+    references.add_argument("query")
+    references.add_argument("--limit", type=int, default=3)
+    references.add_argument("--max-chars", type=int, default=8000)
     sub.add_parser(
         "integrate",
         help="register the shared projection directory with Hermes and OMP",
@@ -97,10 +114,6 @@ def _parser() -> argparse.ArgumentParser:
     skill_inspect.add_argument("skill_id")
     skill_edit = skill_commands.add_parser("edit")
     skill_edit.add_argument("skill_id")
-    skill_archive = skill_commands.add_parser("archive")
-    skill_archive.add_argument("skill_id")
-    skill_restore = skill_commands.add_parser("restore")
-    skill_restore.add_argument("skill_id")
     sub.add_parser("serve")
     sub.add_parser(
         "watch",
@@ -112,7 +125,7 @@ def _parser() -> argparse.ArgumentParser:
 def _run_skills(args: argparse.Namespace) -> None:
     try:
         settings = Settings.load()
-        admin = SkillAdmin(settings.sources(), settings.skill_archive_root)
+        admin = SkillAdmin(settings.sources())
         if args.skills_command == "list":
             rows = admin.list()
             if args.as_json:
@@ -144,24 +157,6 @@ def _run_skills(args: argparse.Namespace) -> None:
             return_code = admin.edit(args.skill_id)
             if return_code:
                 raise SystemExit(return_code)
-            return
-        if args.skills_command == "archive":
-            print(
-                json.dumps(
-                    admin.archive(args.skill_id),
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-            return
-        if args.skills_command == "restore":
-            print(
-                json.dumps(
-                    admin.restore(args.skill_id),
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
             return
         raise AssertionError(args.skills_command)
     except (SkillAdminError, OSError, ValueError) as exc:
@@ -252,6 +247,29 @@ def main() -> None:
     if args.command == "integrate":
         print(json.dumps(integrate_harnesses(Settings.load()), indent=2, sort_keys=True))
         return
+    if args.command == "context":
+        targets = [Path(value) for value in args.targets] or [Path.cwd()]
+        result = audit_context(
+            targets,
+            baseline=Path(args.baseline) if args.baseline else None,
+        )
+        if args.as_json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return
+        summary = result["summary"]
+        print(
+            "Context audit: "
+            f"{summary['files']} files, ~{summary['estimated_tokens']} audited tokens, "
+            f"{summary['review_for_reference']} reference candidates, "
+            f"{summary['potential_shadowed']} precedence warnings."
+        )
+        for row in result["files"]:
+            print(
+                f"  {row['provider']:<18} ~{row['estimated_tokens']:>6} tokens  "
+                f"{row['recommendation']}\n    {row['path']}"
+            )
+        print("Use --json for section, import, shadowing, duplicate, and baseline details.")
+        return
     if args.command == "catalog":
         settings = Settings.load()
         catalog = IweCatalog(settings, settings.sources())
@@ -311,6 +329,12 @@ def main() -> None:
             return
     elif args.command == "retrieve":
         result = service.retrieve_skill(args.query)
+    elif args.command == "references":
+        result = service.retrieve_reference(
+            args.query,
+            limit=args.limit,
+            max_chars=args.max_chars,
+        )
     elif args.command == "find-skills":
         result = service.find_skills(args.query, args.limit)
     elif args.command == "load-skills":

@@ -11,10 +11,11 @@ class SourceConfig:
     kind: str
     path: Path
     enabled: bool = True
-    # ``native`` skills are already visible to a harness, ``cold`` skills live
-    # only in the Retrieval catalog, and ``archived`` skills are intentionally
-    # dormant but remain discoverable.  The state belongs to the canonical
-    # source, never to Chroma or the generated IWE graph.
+    # ``native`` skills are already advertised by a harness, ``hidden`` skills
+    # are installed but deliberately omitted from OMP's prompt metadata,
+    # ``cold`` skills live only in Retrieval, and ``archived`` skills remain
+    # searchable while dormant. A skill may refine a native source to hidden
+    # through its own frontmatter; Chroma and IWE never own this state.
     state: str = "cold"
 
 

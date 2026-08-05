@@ -208,7 +208,7 @@ def source_fingerprint(source: SourceConfig) -> str:
     """Fingerprint canonical source content without querying the vector index."""
     hasher = hashlib.sha256()
     hasher.update(
-        f"v3\0{source.name}\0{source.kind}\0{source.state}\0{source.path}\0".encode(
+        f"v4\0{source.name}\0{source.kind}\0{source.state}\0{source.path}\0".encode(
             "utf-8",
             errors="surrogateescape",
         )
@@ -227,6 +227,12 @@ def source_fingerprint(source: SourceConfig) -> str:
     elif source.kind == "workflows":
         for path in _workflow_paths(source):
             _hash_file(hasher, _logical_path(path, source.path), path)
+    elif source.kind == "references":
+        for path in sorted(source.path.rglob("*.md")):
+            if path.is_file() and not any(
+                part in _IGNORED_DIRECTORIES for part in path.relative_to(source.path).parts
+            ):
+                _hash_file(hasher, _logical_path(path, source.path), path)
     elif source.kind in {"context_mode", "hermes_sessions"}:
         for path in _database_paths(source):
             _hash_stat(hasher, _logical_path(path, source.path), path)
@@ -264,6 +270,8 @@ def _event_relevant(source: SourceConfig, path: Path) -> bool:
             "metrics.db",
             "metrics.db-wal",
         }
+    if source.kind == "references":
+        return path.suffix.casefold() == ".md"
     return False
 
 
@@ -291,6 +299,8 @@ def _watch_roots(source: SourceConfig) -> list[tuple[Path, bool]]:
         profiles = source.path / "profiles"
         if profiles.is_dir():
             roots.append((profiles, True))
+    elif source.kind == "references":
+        roots.append((source.path, True))
     if source.kind == "skills" and source.path.is_dir():
         for logical in _iter_skill_paths(source.path):
             canonical_parent = logical.resolve().parent

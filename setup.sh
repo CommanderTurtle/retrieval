@@ -20,7 +20,9 @@ if [[ -z "$iwe_bin" ]]; then
     printf 'IWE requires a native Rust toolchain (cargo): https://rustup.rs/\n' >&2
     exit 1
   }
-  "$cargo_bin" install iwe iwes --locked
+  # Retrieval depends only on IWE's declared CLI surface. The LSP (`iwes`),
+  # MCP server (`iwec`), and unstable Rust library are separate products.
+  "$cargo_bin" install iwe --locked
   iwe_bin="$HOME/.cargo/bin/iwe"
 fi
 export RETRIEVAL_IWE_COMMAND="${RETRIEVAL_IWE_COMMAND:-$iwe_bin}"
@@ -51,7 +53,7 @@ venv_python="$root/.venv/bin/python"
   exit 1
 }
 "$uv_bin" sync --frozen --python "$venv_python"
-"$venv_python" -c 'from hermes_retrieval.config import Settings; s = Settings.load(); s.skill_archive_root.mkdir(parents=True, exist_ok=True); s.skill_intake_root.mkdir(parents=True, exist_ok=True)'
+"$venv_python" -c 'from hermes_retrieval.config import Settings; Settings.load().skill_intake_root.mkdir(parents=True, exist_ok=True)'
 "$venv_python" -m hermes_retrieval.cli catalog sync
 "$venv_python" -m hermes_retrieval.cli integrate
 

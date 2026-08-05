@@ -6,6 +6,7 @@ from hermes_retrieval.chunking import chunk_text, frontmatter, stable_id
 from hermes_retrieval.models import SourceConfig
 from hermes_retrieval.sources import (
     iter_skills,
+    iter_references,
     iter_workflows,
     skill_catalog,
     skill_bundle_files,
@@ -42,6 +43,43 @@ def test_skill_source_uses_explicit_root(tmp_path: Path):
     assert docs[0].metadata["description"] == "Finds alpha."
     assert docs[0].metadata["state"] == "cold"
     assert docs[0].record_id == stable_id("skills", "repo", "alpha/SKILL.md", 0)
+
+
+def test_native_hidden_skill_becomes_a_dormant_candidate(tmp_path: Path):
+    skill = tmp_path / "omp" / "secret" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: secret\ndescription: Hidden helper.\nhide: true\n---\n# Secret",
+        encoding="utf-8",
+    )
+    source = SourceConfig("omp", "skills", tmp_path / "omp", state="native")
+
+    assert list(iter_skills(source))[0].metadata["state"] == "hidden"
+
+
+def test_hermes_archive_is_separate_from_native_parent(tmp_path: Path):
+    archive = tmp_path / "skills" / ".archive" / "old" / "SKILL.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("# Old", encoding="utf-8")
+
+    assert list(iter_skills(SourceConfig("native", "skills", tmp_path / "skills", state="native"))) == []
+    archived = list(iter_skills(SourceConfig("archive", "skills", archive.parents[1], state="archived")))
+    assert len(archived) == 1
+    assert archived[0].metadata["state"] == "archived"
+
+
+def test_reference_source_splits_markdown_by_heading(tmp_path: Path):
+    reference = tmp_path / "references" / "architecture.md"
+    reference.parent.mkdir()
+    reference.write_text(
+        "Preface.\n\n# Storage\n\nUse local files.\n\n## History\n\nChanged once.",
+        encoding="utf-8",
+    )
+    docs = list(iter_references(SourceConfig("docs", "references", reference.parent)))
+
+    assert [doc.metadata["section_index"] for doc in docs] == [0, 1, 2]
+    assert docs[1].metadata["reference_id"] == "docs:architecture.md#1"
+    assert docs[2].metadata["heading"] == "History"
 
 
 def test_skill_source_follows_linked_skill_directory(tmp_path: Path):

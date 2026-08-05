@@ -161,12 +161,15 @@ class RetrievalIndex:
         return report
 
     def prune_unmanaged(self, sources: Iterable[SourceConfig]) -> list[dict[str, Any]]:
-        """Delete disposable collections for disabled and native-reference sources."""
+        """Delete disposable collections only for disabled sources.
+
+        Native skill roots may contain OMP-hidden skills, so their collection
+        remains managed and is synchronized with only that hidden subset.
+        """
 
         removed: list[dict[str, Any]] = []
         for source in sources:
-            catalog_only = source.kind == "skills" and source.state == "native"
-            if source.enabled and not catalog_only:
+            if source.enabled:
                 continue
             for embedder in self.embedders:
                 name = _collection_name(source, embedder.lane)
@@ -183,7 +186,7 @@ class RetrievalIndex:
                         "lane": embedder.lane,
                         "collection": name,
                         "documents": count,
-                        "reason": "native_catalog_only" if catalog_only else "disabled",
+                        "reason": "disabled",
                     }
                 )
         return removed

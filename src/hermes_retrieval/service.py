@@ -19,6 +19,7 @@ from .refresh import (
 )
 from .sources import (
     iter_documents,
+    read_reference_section,
     skill_bundle_files,
     skill_catalog,
     workflow_catalog,
@@ -93,8 +94,7 @@ class RetrievalService:
         for row in result.get("sources", []):
             source = by_name[str(row["name"])]
             checkpoint = checkpoints.get(source.name)
-            catalog_only = source.kind == "skills" and source.state == "native"
-            if not source.enabled or catalog_only:
+            if not source.enabled:
                 row["checkpoint"] = checkpoint or {}
                 row["index_health"] = {
                     "current": True,
@@ -102,9 +102,7 @@ class RetrievalService:
                     "lanes": row.get("lanes", {}),
                 }
                 row["managed"] = False
-                row["management"] = (
-                    "catalog-reference" if catalog_only else "disabled"
-                )
+                row["management"] = "disabled"
                 row["stale"] = False
                 row["stale_reasons"] = []
                 continue
@@ -170,11 +168,7 @@ class RetrievalService:
         lock_timeout: float | None = None,
     ) -> dict[str, Any]:
         configured_selected = self._selected(names=names)
-        selected = [
-            source
-            for source in configured_selected
-            if not (source.kind == "skills" and source.state == "native")
-        ]
+        selected = list(configured_selected)
         unavailable = [
             source.name
             for source in self._selected(names=names, require_available=False)
@@ -219,16 +213,6 @@ class RetrievalService:
                             "root": str(self.settings.catalog_root),
                             "error": f"{type(exc).__name__}: {exc}",
                         }
-                skipped.extend(
-                    {
-                        "source": source.name,
-                        "kind": source.kind,
-                        "fingerprint": "",
-                        "reason": "native_catalog_only",
-                    }
-                    for source in configured_selected
-                    if source.kind == "skills" and source.state == "native"
-                )
                 for source in selected:
                     if source.kind == "skills" and approved_skill_ids is None:
                         skipped.append(
@@ -347,20 +331,20 @@ class RetrievalService:
             [
                 source
                 for source in self._selected(kinds={"skills"})
-                if source.state in {"cold", "archived"}
+                if source.state in {"native", "hidden", "cold", "archived"}
             ],
             limit=max(limit * 8, 40),
         )
         iwe = self.catalog.find(
             query,
             limit=max(limit * 4, 20),
-            states={"cold", "archived"},
+            states={"hidden", "cold", "archived"},
         )
         ranked: dict[str, dict[str, Any]] = {}
 
         def row_for(item_id: str) -> dict[str, Any] | None:
             entry = entries.get(item_id)
-            if not entry or entry.get("state") not in {"cold", "archived"}:
+            if not entry or entry.get("state") not in {"hidden", "cold", "archived"}:
                 return None
             return ranked.setdefault(
                 item_id,
@@ -470,11 +454,15 @@ class RetrievalService:
                 "projection": None,
             }
         entry = self.catalog.entry(str(skill_id))
-        if entry["state"] not in {"cold", "archived"}:
-            raise RuntimeError("Retrieval Scout may project only cold or archived skills")
+        if entry["state"] not in {"hidden", "cold", "archived"}:
+            raise RuntimeError("Retrieval Scout may return only dormant skills")
         canonical = Path(entry["canonical_path"])
         content = canonical.read_text(encoding="utf-8", errors="replace")
-        projection = self.projections.project(entry)
+        projection = (
+            None
+            if entry["state"] == "hidden"
+            else self.projections.project(entry)
+        )
         return {
             "query": query,
             "selection": selection,
@@ -489,9 +477,87 @@ class RetrievalService:
             },
             "projection": projection,
             "instruction": (
-                "Use the returned SKILL.md immediately. The complete package is also "
-                "projected for durable discovery; run /reload-skills in Hermes or "
-                "/reload in OMP to refresh the current process without restarting."
+                "Use the returned SKILL.md immediately. This hidden skill is already "
+                "installed and intentionally absent from OMP prompt metadata; no copy "
+                "or reload was performed."
+                if entry["state"] == "hidden"
+                else "Use the returned SKILL.md immediately. The complete package is "
+                "also projected for durable discovery; run /reload-skills in Hermes "
+                "or /reload in OMP to refresh the current process without restarting."
+            ),
+        }
+
+    def search_references(self, query: str, limit: int = 6) -> dict[str, Any]:
+        """Search explicitly configured reference libraries by heading section."""
+
+        query = query.strip()
+        if not query:
+            raise ValueError("reference query must not be empty")
+        limit = max(1, min(limit, 20))
+        hits = self.index.search(
+            query,
+            self._selected(kinds={"references"}),
+            limit=max(limit * 4, limit),
+        )
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for hit in hits:
+            reference_id = str(hit.metadata.get("reference_id") or "")
+            if not reference_id or reference_id in seen:
+                continue
+            seen.add(reference_id)
+            rows.append(
+                {
+                    "reference_id": reference_id,
+                    "title": hit.title,
+                    "source": hit.source_name,
+                    "path": hit.locator,
+                    "heading": str(hit.metadata.get("heading") or ""),
+                    "section_index": int(hit.metadata.get("section_index") or 0),
+                    "score": round(hit.score, 6),
+                    "lane": hit.lane,
+                }
+            )
+            if len(rows) >= limit:
+                break
+        return {"query": query, "matches": rows}
+
+    def retrieve_reference(
+        self,
+        query: str,
+        *,
+        limit: int = 3,
+        max_chars: int = 8000,
+    ) -> dict[str, Any]:
+        """Return a bounded set of matching Markdown sections with provenance."""
+
+        result = self.search_references(query, limit=limit)
+        remaining = max(1000, min(max_chars, 24000))
+        sections: list[dict[str, Any]] = []
+        for match in result["matches"]:
+            if remaining <= 0:
+                break
+            content = read_reference_section(
+                Path(str(match["path"])),
+                int(match["section_index"]),
+                expected_heading=str(match["heading"]),
+            )
+            excerpt = content[:remaining]
+            remaining -= len(excerpt)
+            sections.append(
+                {
+                    **match,
+                    "content": excerpt,
+                    "truncated": len(excerpt) < len(content),
+                }
+            )
+        return {
+            "query": query,
+            "sections": sections,
+            "total_chars": sum(len(str(row["content"])) for row in sections),
+            "instruction": (
+                "These are optional reference sections, not active rules. Canonical "
+                "paths and headings are included for verification."
             ),
         }
 

@@ -28,7 +28,7 @@ class _Client:
         self.collections.pop(name)
 
 
-def test_prune_unmanaged_deletes_disabled_and_native_collections() -> None:
+def test_prune_unmanaged_keeps_native_collection_for_hidden_subset() -> None:
     index = object.__new__(RetrievalIndex)
     index.embedders = [SimpleNamespace(lane="fastembed")]
     disabled_name = "hermes-retrieval-context_mode-history-fastembed"
@@ -49,8 +49,9 @@ def test_prune_unmanaged_deletes_disabled_and_native_collections() -> None:
 
     report = index.prune_unmanaged(sources)
 
-    assert index.client.deleted == [disabled_name, native_name]
+    assert index.client.deleted == [disabled_name]
     assert enabled_name in index.client.collections
+    assert native_name in index.client.collections
     assert report == [
         {
             "source": "history",
@@ -59,13 +60,5 @@ def test_prune_unmanaged_deletes_disabled_and_native_collections() -> None:
             "collection": disabled_name,
             "documents": 42,
             "reason": "disabled",
-        },
-        {
-            "source": "active",
-            "kind": "skills",
-            "lane": "fastembed",
-            "collection": native_name,
-            "documents": 3,
-            "reason": "native_catalog_only",
         }
     ]

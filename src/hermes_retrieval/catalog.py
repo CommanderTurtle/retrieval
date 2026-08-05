@@ -22,7 +22,7 @@ from .taxonomy import Taxonomy, load_category_overrides, load_taxonomy
 
 _MANIFEST = ".retrieval-catalog.json"
 _MANIFEST_VERSION = 2
-_STATE_PRIORITY = {"archived": 1, "cold": 2, "native": 3}
+_STATE_PRIORITY = {"archived": 1, "cold": 2, "hidden": 3, "native": 4}
 
 
 def _slug(value: str, fallback: str = "item") -> str:
@@ -196,7 +196,7 @@ class IweCatalog:
                     "title": document.title,
                     "description": str(document.metadata.get("description") or ""),
                     "source": source.name,
-                    "state": source.state,
+                    "state": str(document.metadata.get("state") or source.state),
                     "canonical_path": canonical_path,
                     "relative_path": relative_path,
                     "categories": categories,
@@ -243,7 +243,7 @@ class IweCatalog:
         dormant = {
             str(entry["item_id"]): entry
             for entry in by_title.values()
-            if entry["state"] in {"cold", "archived"}
+            if entry["state"] in {"hidden", "cold", "archived"}
         }
         entries = {
             item_id: entry
@@ -314,7 +314,46 @@ class IweCatalog:
             for source in self.sources
             if source.enabled and source.kind == "skills" and source.state == "native"
         ]
-        report = IweCatalog(self.settings, [*native, candidate]).audit()
+        probe = IweCatalog(self.settings, [*native, candidate])
+        inventory = probe._inventory()
+        entries = {
+            item_id: entry
+            for item_id, entry in inventory["entries"].items()
+            if entry["source"] == name
+        }
+        review = {
+            item_id: entry
+            for item_id, entry in inventory["review"].items()
+            if entry["source"] == name
+        }
+        report = {
+            "total": len(entries) + len(review),
+            "approved": len(entries),
+            "review_required": len(review),
+            "native_excluded": inventory["native_excluded"],
+            "duplicates_excluded": inventory["duplicates_excluded"],
+            "categories": dict(
+                sorted(
+                    Counter(
+                        category
+                        for entry in entries.values()
+                        for category in entry["categories"]
+                    ).items()
+                )
+            ),
+            "sources": {name: len(entries)},
+            "review": [
+                {
+                    "skill_id": item_id,
+                    "name": entry["title"],
+                    "source": entry["source"],
+                    "path": entry["canonical_path"],
+                    "tags": entry["tags"],
+                    "reason": entry["review_reason"],
+                }
+                for item_id, entry in review.items()
+            ],
+        }
         report["path"] = str(candidate_path)
         report["name"] = name
         return report
@@ -488,6 +527,7 @@ class IweCatalog:
             "review_required": len(review),
             "native_excluded": native_excluded,
             "duplicates_excluded": inventory["duplicates_excluded"],
+            "hidden": sum(row["state"] == "hidden" for row in entries.values()),
             "cold": sum(row["state"] == "cold" for row in entries.values()),
             "archived": sum(row["state"] == "archived" for row in entries.values()),
             "files_changed": changed,
@@ -555,7 +595,7 @@ class IweCatalog:
         except ValueError as exc:
             raise RuntimeError("IWE returned invalid JSON") from exc
         by_key = {row["iwe_key"]: row for row in self.entries().values()}
-        allowed = states or {"cold", "archived"}
+        allowed = states or {"hidden", "cold", "archived"}
         rows: list[dict[str, Any]] = []
         for rank, match in enumerate(found, start=1):
             if not isinstance(match, dict):
@@ -610,6 +650,33 @@ class IweCatalog:
         manifest = self.manifest()
         entries = list(manifest.get("entries", {}).values())
         review = list(manifest.get("review", {}).values())
+        iwe: dict[str, Any]
+        try:
+            command = self._iwe()
+            result = subprocess.run(
+                [command, "--version"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+            iwe = {
+                "command": command,
+                "available": result.returncode == 0,
+                "version": (result.stdout or result.stderr).strip(),
+                "integration": "external-cli",
+                "auto_update": False,
+            }
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            iwe = {
+                "command": self.settings.iwe_command,
+                "available": False,
+                "version": "",
+                "integration": "external-cli",
+                "auto_update": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         return {
             "root": str(self.root),
             "initialized": (self.root / ".iwe" / "config.toml").is_file(),
@@ -619,7 +686,8 @@ class IweCatalog:
             "duplicates_excluded": int(manifest.get("duplicates_excluded") or 0),
             "states": {
                 state: sum(row.get("state") == state for row in entries)
-                for state in ("native", "cold", "archived")
+                for state in ("native", "hidden", "cold", "archived")
             },
+            "iwe": iwe,
             "generated_at": manifest.get("generated_at", ""),
         }

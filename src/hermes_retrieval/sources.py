@@ -13,6 +13,8 @@ import tempfile
 import tomllib
 from typing import Iterable
 
+import yaml
+
 from .chunking import chunk_text, content_hash, frontmatter, markdown_title, stable_id
 from .config import Settings
 from .models import Document, SourceConfig
@@ -42,12 +44,13 @@ def _iter_skill_paths(root: Path) -> Iterable[Path]:
     own top level contains ``SKILL.md``; never recursively walk an arbitrary
     external tree.
     """
+    excluded = {".git", ".archive", ".retrieval-archive", "node_modules", ".venv"}
     selected = {
         path.absolute()
         for path in root.rglob("SKILL.md")
         if not any(
-            part in {".git", ".retrieval-archive", "node_modules", ".venv"}
-            for part in path.parts
+            part in excluded
+            for part in path.relative_to(root).parts
         )
     }
     for directory in root.rglob("*"):
@@ -55,8 +58,8 @@ def _iter_skill_paths(root: Path) -> Iterable[Path]:
             continue
         logical_path = (directory / "SKILL.md").absolute()
         if any(
-            part in {".git", ".retrieval-archive", "node_modules", ".venv"}
-            for part in logical_path.parts
+            part in excluded
+            for part in logical_path.relative_to(root.absolute()).parts
         ):
             continue
         if logical_path.resolve().is_file():
@@ -106,6 +109,48 @@ def _descriptor_text(
     return "\n".join(parts)[:max_chars]
 
 
+def _frontmatter_payload(text: str) -> dict[str, object]:
+    """Read typed skill metadata without changing the legacy string parser."""
+
+    if not text.startswith("---\n"):
+        return {}
+    end = text.find("\n---", 4)
+    if end < 0:
+        return {}
+    try:
+        payload = yaml.safe_load(text[4:end]) or {}
+    except yaml.YAMLError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _skill_state(source: SourceConfig, text: str) -> str:
+    """Promote OMP-hidden skills out of an otherwise native source.
+
+    OMP normalizes Agent Skills' ``disable-model-invocation`` field to
+    ``disableModelInvocation``. Accept both spellings so Retrieval agrees with
+    either authored form while leaving cold and archived source policy intact.
+    """
+
+    if source.state != "native":
+        return source.state
+    payload = _frontmatter_payload(text)
+    if any(
+        _truthy(payload.get(key))
+        for key in ("hide", "disableModelInvocation", "disable-model-invocation")
+    ):
+        return "hidden"
+    return "native"
+
+
 def iter_skills(source: SourceConfig) -> Iterable[Document]:
     for path in _iter_skill_paths(source.path):
         logical_path = path.absolute()
@@ -121,6 +166,7 @@ def iter_skills(source: SourceConfig) -> Iterable[Document]:
             logical_path.parent.name or source.name,
         )
         description = (meta.get("description") or "").strip()[:1000]
+        state = _skill_state(source, text)
         relative = logical_path.relative_to(source.path).as_posix()
         descriptor = _descriptor_text(
             text,
@@ -140,11 +186,94 @@ def iter_skills(source: SourceConfig) -> Iterable[Document]:
                 "skill_id": skill_id,
                 "description": description,
                 "relative_path": relative,
-                "state": source.state,
+                "state": state,
                 "descriptor_version": 2,
                 "content_hash": content_hash(descriptor),
             },
         )
+
+
+_REFERENCE_EXCLUDES = {
+    ".git",
+    ".iwe",
+    ".venv",
+    "node_modules",
+    "dist",
+    "build",
+}
+_HEADING = re.compile(r"(?m)^(#{1,6})\s+(.+?)\s*$")
+
+
+def _reference_sections(text: str, fallback: str) -> list[tuple[int, str, str]]:
+    """Split Markdown on headings while preserving useful preamble text."""
+
+    matches = list(_HEADING.finditer(text))
+    sections: list[tuple[int, str, str]] = []
+    if not matches:
+        clean = text.strip()
+        return [(0, fallback, clean)] if clean else []
+    preamble = text[: matches[0].start()].strip()
+    if preamble:
+        sections.append((0, fallback, preamble))
+    for position, match in enumerate(matches):
+        end = matches[position + 1].start() if position + 1 < len(matches) else len(text)
+        heading = match.group(2).strip()
+        content = text[match.start() : end].strip()
+        if content:
+            sections.append((position + 1, heading, content))
+    return sections
+
+
+def iter_references(source: SourceConfig) -> Iterable[Document]:
+    """Yield one bounded, addressable document per Markdown heading."""
+
+    for path in sorted(source.path.rglob("*.md")):
+        if not path.is_file() or any(part in _REFERENCE_EXCLUDES for part in path.parts):
+            continue
+        canonical = _safe_resolve(path, source.path)
+        text = canonical.read_text(encoding="utf-8", errors="replace")
+        relative = canonical.relative_to(source.path.resolve()).as_posix()
+        file_title = markdown_title(text, canonical.stem)
+        for section_index, heading, content in _reference_sections(text, file_title):
+            item_id = f"{source.name}:{relative}#{section_index}"
+            descriptor = content[:12000]
+            yield Document(
+                record_id=stable_id(source.kind, source.name, relative, section_index),
+                source_name=source.name,
+                kind=source.kind,
+                title=f"{file_title} · {heading}" if heading != file_title else file_title,
+                content=descriptor,
+                locator=str(canonical),
+                metadata={
+                    "reference_id": item_id,
+                    "relative_path": relative,
+                    "heading": heading,
+                    "section_index": section_index,
+                    "state": source.state,
+                    "content_hash": content_hash(descriptor),
+                },
+            )
+
+
+def read_reference_section(
+    path: Path,
+    section_index: int,
+    *,
+    expected_heading: str = "",
+) -> str:
+    """Read one previously indexed section without rescanning its source tree."""
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    fallback = markdown_title(text, path.stem)
+    for position, heading, content in _reference_sections(text, fallback):
+        if position == section_index:
+            if expected_heading and heading != expected_heading:
+                raise ValueError(
+                    "reference index is stale; heading changed from "
+                    f"{expected_heading!r} to {heading!r}"
+                )
+            return content
+    raise ValueError(f"reference section no longer exists: {path}#{section_index}")
 
 
 _WORKFLOW_DIRECTORIES = {
@@ -591,6 +720,8 @@ def iter_documents(source: SourceConfig, settings: Settings) -> Iterable[Documen
         return iter_context_mode(source)
     if source.kind == "hermes_sessions":
         return iter_hermes_sessions(source, settings)
+    if source.kind == "references":
+        return iter_references(source)
     raise ValueError(f"unsupported source kind: {source.kind}")
 
 

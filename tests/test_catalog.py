@@ -80,6 +80,11 @@ def test_iwe_find_filters_native_entries(
                 "iwe_key": "skills/native/b",
                 "state": "native",
             },
+            "hidden:c": {
+                "item_id": "hidden:c",
+                "iwe_key": "skills/hidden/c",
+                "state": "hidden",
+            },
         },
         "owned_files": [],
     }
@@ -96,6 +101,7 @@ def test_iwe_find_filters_native_entries(
             stdout=json.dumps(
                 [
                     {"key": "skills/native/b"},
+                    {"key": "skills/hidden/c"},
                     {"key": "skills/cold/a"},
                 ]
             ),
@@ -103,7 +109,41 @@ def test_iwe_find_filters_native_entries(
         ),
     )
 
-    assert [row["item_id"] for row in catalog.find("a")] == ["cold:a"]
+    assert [row["item_id"] for row in catalog.find("a")] == ["hidden:c", "cold:a"]
+
+
+def test_hidden_native_skill_is_graphed_without_exposing_active_neighbor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    hidden = tmp_path / "native" / "packet-hidden" / "SKILL.md"
+    active = tmp_path / "native" / "packet-active" / "SKILL.md"
+    hidden.parent.mkdir(parents=True)
+    active.parent.mkdir(parents=True)
+    hidden.write_text(
+        "---\nname: Packet Hidden\ndescription: Audit network packets.\nhide: true\n---\n# Packet Hidden",
+        encoding="utf-8",
+    )
+    active.write_text(
+        "---\nname: Packet Active\ndescription: Audit network packets.\n---\n# Packet Active",
+        encoding="utf-8",
+    )
+    catalog = IweCatalog(
+        _settings(tmp_path, tmp_path / "catalog"),
+        [SourceConfig("omp", "skills", tmp_path / "native", state="native")],
+    )
+    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
+    monkeypatch.setattr(
+        "hermes_retrieval.catalog.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    report = catalog.sync()
+
+    assert report["entries"] == 1
+    assert report["hidden"] == 1
+    assert report["native_excluded"] == 1
+    assert catalog.entry("omp:packet-hidden")["state"] == "hidden"
 
 
 def test_native_name_suppresses_duplicate_cold_skill(
