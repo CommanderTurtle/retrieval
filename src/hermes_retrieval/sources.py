@@ -187,6 +187,7 @@ def iter_skills(source: SourceConfig) -> Iterable[Document]:
                 "description": description,
                 "relative_path": relative,
                 "state": state,
+                "native_harness": source.harness,
                 "descriptor_version": 2,
                 "content_hash": content_hash(descriptor),
             },

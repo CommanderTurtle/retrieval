@@ -99,7 +99,9 @@ class Settings:
     skill_intake_root: Path
     catalog_root: Path
     projection_root: Path
+    target_harness: str
     iwe_command: str
+    iwe_source: Path
     omp_command: str
     scout_enabled: bool
     scout_timeout: int
@@ -111,6 +113,19 @@ class Settings:
     projection_max_bytes: int
     hermes_config: Path
     omp_config: Path
+    omp_mcp_config: Path
+
+    def __post_init__(self) -> None:
+        if self.target_harness not in {"hermes", "omp"}:
+            raise ValueError(
+                "RETRIEVAL_HARNESS must be either 'hermes' or 'omp'"
+            )
+
+    def projection_lane_root(self, harness: str) -> Path:
+        lane = harness.strip().casefold()
+        if lane not in {"hermes", "omp"}:
+            raise ValueError(f"unsupported retrieval harness: {harness}")
+        return self.projection_root / lane / "skills"
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Settings":
@@ -122,7 +137,7 @@ class Settings:
                 os.path.expanduser(
                     os.getenv(
                         "RETRIEVAL_ARCHIVE_DB",
-                        "~/.local/share/hermes-retrieval/archive.sqlite3",
+                        "~/.local/share/retrieval/archive.sqlite3",
                     )
                 )
             )
@@ -215,7 +230,7 @@ class Settings:
                     os.path.expanduser(
                         os.getenv(
                             "RETRIEVAL_CATALOG_ROOT",
-                            "~/.local/share/hermes-retrieval/catalog",
+                            "~/.local/share/retrieval/catalog",
                         )
                     )
                 )
@@ -225,14 +240,24 @@ class Settings:
                     os.path.expanduser(
                         os.getenv(
                             "RETRIEVAL_PROJECTION_ROOT",
-                            "~/.local/share/hermes-retrieval/projections/skills",
+                            "~/.local/share/retrieval/projections",
                         )
                     )
                 )
             ).resolve(),
+            target_harness=os.getenv("RETRIEVAL_HARNESS", "hermes")
+            .strip()
+            .casefold(),
             iwe_command=os.path.expandvars(
                 os.path.expanduser(os.getenv("RETRIEVAL_IWE_COMMAND", "~/.cargo/bin/iwe"))
             ),
+            iwe_source=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv("RETRIEVAL_IWE_SOURCE", "~/Hermes/iwe")
+                    )
+                )
+            ).resolve(),
             omp_command=os.path.expandvars(
                 os.path.expanduser(os.getenv("RETRIEVAL_OMP_COMMAND", "~/.bun/bin/omp"))
             ),
@@ -240,14 +265,14 @@ class Settings:
             scout_timeout=max(15, _int_env("RETRIEVAL_SCOUT_TIMEOUT", 120)),
             scout_max_calls=max(1, min(20, _int_env("RETRIEVAL_SCOUT_MAX_CALLS", 8))),
             scout_profile=os.getenv(
-                "RETRIEVAL_SCOUT_PROFILE", "hermes-retrieval-scout"
+                "RETRIEVAL_SCOUT_PROFILE", "retrieval-scout"
             ).strip(),
             scout_home=Path(
                 os.path.expandvars(
                     os.path.expanduser(
                         os.getenv(
                             "RETRIEVAL_SCOUT_HOME",
-                            "~/.local/share/hermes-retrieval/scout-home",
+                            "~/.local/share/retrieval/scout-home",
                         )
                     )
                 )
@@ -271,6 +296,16 @@ class Settings:
                 os.path.expandvars(
                     os.path.expanduser(
                         os.getenv("RETRIEVAL_OMP_CONFIG", "~/.omp/agent/config.yml")
+                    )
+                )
+            ).resolve(),
+            omp_mcp_config=Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        os.getenv(
+                            "RETRIEVAL_OMP_MCP_CONFIG",
+                            "~/.omp/agent/mcp.json",
+                        )
                     )
                 )
             ).resolve(),
@@ -321,6 +356,18 @@ class Settings:
                     f"unsupported source state {state!r} for {name}; "
                     "use native, hidden, cold, or archived"
                 )
+            harness = str(row.get("harness") or "").strip().casefold()
+            if not harness and kind == "skills":
+                logical = absolute_path.as_posix()
+                if "/.hermes/" in logical or logical.endswith("/.hermes"):
+                    harness = "hermes"
+                elif "/.omp/" in logical or logical.endswith("/.omp"):
+                    harness = "omp"
+            if harness not in {"", "hermes", "omp"}:
+                raise ValueError(
+                    f"unsupported source harness {harness!r} for {name}; "
+                    "use hermes or omp"
+                )
             out.append(
                 SourceConfig(
                     name=name,
@@ -332,6 +379,7 @@ class Settings:
                     path=absolute_path,
                     enabled=bool(row.get("enabled", True)),
                     state=state,
+                    harness=harness,
                 )
             )
             seen.add(name)

@@ -19,7 +19,7 @@ def test_scout_uses_private_home_and_explicit_agent_directory(tmp_path: Path) ->
     omp_config = tmp_path / ".omp" / "agent" / "config.yml"
     profile = tmp_path / ".omp" / "profiles" / "retrieval" / "agent"
     profile.mkdir(parents=True)
-    (profile / ".hermes-retrieval-scout.json").write_text("{}", encoding="utf-8")
+    (profile / ".retrieval-scout.json").write_text("{}", encoding="utf-8")
     settings = SimpleNamespace(
         scout_profile="retrieval",
         scout_home=tmp_path / "scout-home",

@@ -21,7 +21,7 @@ from .taxonomy import Taxonomy, load_category_overrides, load_taxonomy
 
 
 _MANIFEST = ".retrieval-catalog.json"
-_MANIFEST_VERSION = 2
+_MANIFEST_VERSION = 3
 _STATE_PRIORITY = {"archived": 1, "cold": 2, "hidden": 3, "native": 4}
 
 
@@ -190,13 +190,29 @@ class IweCatalog:
                 stem = _slug(document.title, _slug(Path(canonical_path).parent.name))
                 digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:8]
                 card = f"skills/{_slug(source.name)}/{stem}-{digest}.md"
+                state = str(document.metadata.get("state") or source.state)
+                native_harnesses = (
+                    [source.harness]
+                    if state == "native" and source.harness
+                    else []
+                )
+                hidden_harnesses = (
+                    [source.harness]
+                    if state == "hidden" and source.harness
+                    else []
+                )
                 candidates.append({
                     "item_id": item_id,
                     "kind": "skill",
                     "title": document.title,
                     "description": str(document.metadata.get("description") or ""),
                     "source": source.name,
-                    "state": str(document.metadata.get("state") or source.state),
+                    "state": state,
+                    "native_harness": str(
+                        document.metadata.get("native_harness") or source.harness
+                    ),
+                    "native_harnesses": native_harnesses,
+                    "hidden_harnesses": hidden_harnesses,
                     "canonical_path": canonical_path,
                     "relative_path": relative_path,
                     "categories": categories,
@@ -205,6 +221,24 @@ class IweCatalog:
                     "iwe_key": card[:-3],
                     "descriptor": document.content,
                 })
+
+        def merge_harnesses(
+            preferred: dict[str, Any],
+            other: dict[str, Any],
+        ) -> dict[str, Any]:
+            merged = dict(preferred)
+            for key in ("native_harnesses", "hidden_harnesses"):
+                merged[key] = sorted(
+                    {
+                        str(value)
+                        for value in [
+                            *(preferred.get(key) or []),
+                            *(other.get(key) or []),
+                        ]
+                        if str(value) in {"hermes", "omp"}
+                    }
+                )
+            return merged
 
         def prefer(new: dict[str, Any], current: dict[str, Any]) -> bool:
             new_priority = _STATE_PRIORITY[str(new["state"])]
@@ -227,23 +261,45 @@ class IweCatalog:
         for entry in candidates:
             key = str(entry["canonical_path"])
             current = by_canonical.get(key)
-            if current is None or prefer(entry, current):
+            if current is None:
                 by_canonical[key] = entry
+            elif prefer(entry, current):
+                by_canonical[key] = merge_harnesses(entry, current)
+            else:
+                by_canonical[key] = merge_harnesses(current, entry)
 
         by_title: dict[str, dict[str, Any]] = {}
         for entry in by_canonical.values():
             key = " ".join(str(entry["title"]).casefold().split())
             current = by_title.get(key)
-            if current is None or prefer(entry, current):
+            if current is None:
                 by_title[key] = entry
+            elif prefer(entry, current):
+                by_title[key] = merge_harnesses(entry, current)
+            else:
+                by_title[key] = merge_harnesses(current, entry)
 
-        native_excluded = sum(
-            entry["state"] == "native" for entry in by_title.values()
-        )
+        def fully_native(entry: dict[str, Any]) -> bool:
+            harnesses = set(entry.get("native_harnesses") or [])
+            if entry["state"] == "native" and not harnesses:
+                # A legacy/native source without provenance is conservatively
+                # treated as visible in both harnesses.
+                return True
+            return harnesses >= {"hermes", "omp"}
+
+        native_excluded = sum(fully_native(entry) for entry in by_title.values())
+        native_by_harness = {
+            harness: sum(
+                harness in set(entry.get("native_harnesses") or [])
+                for entry in by_title.values()
+            )
+            for harness in ("hermes", "omp")
+        }
         dormant = {
             str(entry["item_id"]): entry
             for entry in by_title.values()
-            if entry["state"] in {"hidden", "cold", "archived"}
+            if not fully_native(entry)
+            and entry["state"] in {"native", "hidden", "cold", "archived"}
         }
         entries = {
             item_id: entry
@@ -262,6 +318,7 @@ class IweCatalog:
             "entries": dict(sorted(entries.items())),
             "review": dict(sorted(review.items())),
             "native_excluded": native_excluded,
+            "native_by_harness": native_by_harness,
             "duplicates_excluded": len(candidates) - len(by_title),
         }
 
@@ -280,6 +337,7 @@ class IweCatalog:
             "approved": len(entries),
             "review_required": len(review),
             "native_excluded": inventory["native_excluded"],
+            "native_by_harness": inventory["native_by_harness"],
             "duplicates_excluded": inventory["duplicates_excluded"],
             "categories": dict(sorted(category_counts.items())),
             "sources": dict(sorted(source_counts.items())),
@@ -366,6 +424,9 @@ class IweCatalog:
             "kind": "skill",
             "source": entry["source"],
             "state": entry["state"],
+            "native_harness": entry.get("native_harness", ""),
+            "native_harnesses": entry.get("native_harnesses", []),
+            "hidden_harnesses": entry.get("hidden_harnesses", []),
             "categories": entry["categories"],
             "tags": entry["tags"],
             "canonical_path": entry["canonical_path"],
@@ -494,6 +555,7 @@ class IweCatalog:
             "entries": entries,
             "review": review,
             "native_excluded": native_excluded,
+            "native_by_harness": inventory["native_by_harness"],
             "duplicates_excluded": inventory["duplicates_excluded"],
             "owned_files": sorted(owned),
         }
@@ -526,6 +588,7 @@ class IweCatalog:
             "entries": len(entries),
             "review_required": len(review),
             "native_excluded": native_excluded,
+            "native_by_harness": inventory["native_by_harness"],
             "duplicates_excluded": inventory["duplicates_excluded"],
             "hidden": sum(row["state"] == "hidden" for row in entries.values()),
             "cold": sum(row["state"] == "cold" for row in entries.values()),
@@ -677,12 +740,53 @@ class IweCatalog:
                 "auto_update": False,
                 "error": f"{type(exc).__name__}: {exc}",
             }
+        source = self.settings.iwe_source
+        source_status: dict[str, Any] = {
+            "path": str(source),
+            "available": False,
+            "remote": "",
+            "branch": "",
+            "head": "",
+            "dirty": False,
+            "auto_update": False,
+            "update": f"git -C {source} pull --ff-only",
+            "install": f"cargo install --path {source / 'crates' / 'iwe'} --locked --force",
+        }
+        if source.is_dir():
+            try:
+                def git(*arguments: str) -> tuple[int, str]:
+                    result = subprocess.run(
+                        ["git", "-C", str(source), *arguments],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=5,
+                        check=False,
+                    )
+                    return result.returncode, (result.stdout or result.stderr).strip()
+
+                valid, _inside = git("rev-parse", "--is-inside-work-tree")
+                if valid == 0:
+                    source_status["available"] = True
+                    _code, source_status["remote"] = git(
+                        "remote", "get-url", "origin"
+                    )
+                    _code, source_status["branch"] = git(
+                        "rev-parse", "--abbrev-ref", "HEAD"
+                    )
+                    _code, source_status["head"] = git("rev-parse", "HEAD")
+                    _code, dirty = git("status", "--porcelain")
+                    source_status["dirty"] = bool(dirty)
+            except (OSError, subprocess.SubprocessError) as exc:
+                source_status["error"] = f"{type(exc).__name__}: {exc}"
+        iwe["source"] = source_status
         return {
             "root": str(self.root),
             "initialized": (self.root / ".iwe" / "config.toml").is_file(),
             "entries": len(entries),
             "review_required": len(review),
             "native_excluded": int(manifest.get("native_excluded") or 0),
+            "native_by_harness": dict(manifest.get("native_by_harness") or {}),
             "duplicates_excluded": int(manifest.get("duplicates_excluded") or 0),
             "states": {
                 state: sum(row.get("state") == state for row in entries)

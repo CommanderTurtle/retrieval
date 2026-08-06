@@ -10,6 +10,22 @@ uv_bin="$(command -v uv || true)"
   exit 1
 }
 
+projects_dir="${HERMES_PROJECTS_DIR:-$HOME/Hermes}"
+iwe_source="${RETRIEVAL_IWE_SOURCE:-$projects_dir/iwe}"
+if [[ -e "$iwe_source" && ! -d "$iwe_source/.git" ]]; then
+  printf 'IWE source path exists but is not a Git checkout: %s\n' "$iwe_source" >&2
+  exit 1
+fi
+if [[ ! -d "$iwe_source/.git" ]]; then
+  git_bin="$(command -v git || true)"
+  [[ -n "$git_bin" ]] || {
+    printf 'git is required to maintain the IWE source checkout.\n' >&2
+    exit 1
+  }
+  mkdir -p -- "$(dirname -- "$iwe_source")"
+  "$git_bin" clone --filter=blob:none https://github.com/iwe-org/iwe.git "$iwe_source"
+fi
+
 iwe_bin="$(command -v iwe || true)"
 if [[ -z "$iwe_bin" && -x "$HOME/.cargo/bin/iwe" ]]; then
   iwe_bin="$HOME/.cargo/bin/iwe"
@@ -20,12 +36,12 @@ if [[ -z "$iwe_bin" ]]; then
     printf 'IWE requires a native Rust toolchain (cargo): https://rustup.rs/\n' >&2
     exit 1
   }
-  # Retrieval depends only on IWE's declared CLI surface. The LSP (`iwes`),
-  # MCP server (`iwec`), and unstable Rust library are separate products.
-  "$cargo_bin" install iwe --locked
+  # Build only the stable CLI integration surface from the visible checkout.
+  "$cargo_bin" install --path "$iwe_source/crates/iwe" --locked
   iwe_bin="$HOME/.cargo/bin/iwe"
 fi
 export RETRIEVAL_IWE_COMMAND="${RETRIEVAL_IWE_COMMAND:-$iwe_bin}"
+export RETRIEVAL_IWE_SOURCE="${RETRIEVAL_IWE_SOURCE:-$iwe_source}"
 
 if [[ ! -f .env ]]; then
   cp -- .env.example .env
@@ -57,5 +73,5 @@ venv_python="$root/.venv/bin/python"
 "$venv_python" -m hermes_retrieval.cli catalog sync
 "$venv_python" -m hermes_retrieval.cli integrate
 
-printf 'Hermes Retrieval is ready in %s\n' "$root"
+printf 'Retrieval is ready in %s\n' "$root"
 printf 'Review .env and sources.toml, then run: %s/start.sh\n' "$root"

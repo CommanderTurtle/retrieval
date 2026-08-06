@@ -16,13 +16,13 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 mcp = FastMCP(
-    "Hermes Retrieval",
+    "Retrieval",
     instructions=(
         "Retrieve at most one specialist skill through an isolated read-only scout. "
         "The exact SKILL.md is returned immediately and its complete package is copied "
-        "only into Retrieval's manifest-owned projection directory. Optional reference "
-        "libraries are retrieved separately as bounded heading sections. List or clear "
-        "temporary skill projections when they are no longer useful."
+        "only into this MCP instance's Hermes or OMP projection lane. Optional reference "
+        "libraries are retrieved separately as bounded heading sections. Projection "
+        "inspection and cleanup are intentionally human-only CLI operations."
     ),
 )
 
@@ -43,23 +43,6 @@ def retrieve_skill(query: str) -> dict:
     """
 
     return _service().retrieve_skill(query=query)
-
-
-@mcp.tool()
-def list_retrieved_skills() -> dict:
-    """List only temporary skill packages owned by Retrieval's projection manifest."""
-
-    return _service().list_retrieved_skills()
-
-
-@mcp.tool()
-def clear_retrieved_skills(skill_ids: list[str] | None = None) -> dict:
-    """Clear selected temporary projections, or all when IDs are omitted.
-
-    This never mutates canonical, native, or archived skill directories.
-    """
-
-    return _service().clear_retrieved_skills(skill_ids=skill_ids)
 
 
 @mcp.tool()

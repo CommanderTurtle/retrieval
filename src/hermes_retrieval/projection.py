@@ -22,6 +22,11 @@ from .config import Settings
 _MANIFEST_NAME = ".retrieval-projections.json"
 _MARKER_NAME = ".retrieval-projection.json"
 _IGNORED = {".git", ".venv", "__pycache__", "node_modules"}
+_HARNESSES = {"hermes", "omp"}
+
+
+def _reload_command(harness: str) -> str:
+    return "/reload-skills" if harness == "hermes" else "/reload"
 
 
 def _slug(value: str) -> str:
@@ -59,21 +64,25 @@ def _remove_owned_tree(root: Path, target: Path) -> None:
 
 
 class SkillProjection:
-    """Own temporary skill copies without ever mutating canonical libraries."""
+    """Own one harness's temporary copies without mutating canonical libraries."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, harness: str):
         self.settings = settings
-        self.root = settings.projection_root
+        self.harness = harness.strip().casefold()
+        if self.harness not in _HARNESSES:
+            raise ValueError(f"unsupported retrieval harness: {harness}")
+        self.root = settings.projection_lane_root(self.harness)
         self.manifest_path = self.root / _MANIFEST_NAME
 
     def _manifest(self) -> dict[str, Any]:
         try:
             payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return {"version": 1, "skills": {}}
+            return {"version": 2, "harness": self.harness, "skills": {}}
         if (
             not isinstance(payload, dict)
-            or payload.get("version") != 1
+            or payload.get("version") != 2
+            or payload.get("harness") != self.harness
             or not isinstance(payload.get("skills"), dict)
         ):
             raise RuntimeError(
@@ -155,6 +164,7 @@ class SkillProjection:
                 shutil.copy2(source_file, destination)
             marker = {
                 "item_id": item_id,
+                "harness": self.harness,
                 "source": entry["source"],
                 "canonical_path": str(skill_path),
                 "projected_at": datetime.now(timezone.utc).isoformat(),
@@ -173,6 +183,8 @@ class SkillProjection:
                     ) from exc
                 if owned.get("item_id") != item_id:
                     raise RuntimeError(f"projection ownership mismatch: {target}")
+                if owned.get("harness") != self.harness:
+                    raise RuntimeError(f"projection harness mismatch: {target}")
                 backup = self.root / f".{directory_name}.old-{uuid.uuid4().hex}"
                 target.rename(backup)
             stage.rename(target)
@@ -188,6 +200,7 @@ class SkillProjection:
 
         projected = {
             "item_id": item_id,
+            "harness": self.harness,
             "name": entry["title"],
             "source": entry["source"],
             "state": entry["state"],
@@ -213,11 +226,9 @@ class SkillProjection:
             rows.append({**row, "item_id": item_id, "available": path.is_dir()})
         return {
             "root": str(self.root),
+            "harness": self.harness,
             "skills": rows,
-            "reload": {
-                "hermes": "/reload-skills",
-                "omp": "/reload",
-            },
+            "reload": _reload_command(self.harness),
         }
 
     def clear(self, skill_ids: list[str] | None = None) -> dict[str, Any]:
@@ -244,17 +255,19 @@ class SkillProjection:
                     raise RuntimeError(
                         f"refusing to clear projection with mismatched owner: {target}"
                     )
+                if marker.get("harness") != self.harness:
+                    raise RuntimeError(
+                        f"refusing to clear projection from another harness: {target}"
+                    )
                 _remove_owned_tree(self.root, target)
             removed.append(item_id)
             known.pop(item_id)
         self._write_manifest(manifest)
         return {
+            "harness": self.harness,
             "removed": removed,
             "remaining": len(known),
-            "reload": {
-                "hermes": "/reload-skills",
-                "omp": "/reload",
-            },
+            "reload": _reload_command(self.harness),
         }
 
 
@@ -283,6 +296,26 @@ def _write_yaml_if_changed(path: Path, payload: dict[str, Any]) -> bool:
     return True
 
 
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"invalid JSON configuration: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"configuration root must be an object: {path}")
+    return payload
+
+
+def _write_json_if_changed(path: Path, payload: dict[str, Any]) -> bool:
+    rendered = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    if path.is_file() and path.read_text(encoding="utf-8") == rendered:
+        return False
+    _atomic_text(path, rendered)
+    return True
+
+
 def _prepare_scout_profile(
     settings: Settings,
     base_config: dict[str, Any],
@@ -296,8 +329,26 @@ def _prepare_scout_profile(
         )
     omp_home = settings.omp_config.parent.parent
     profile_root = omp_home / "profiles" / profile_name / "agent"
-    marker = profile_root / ".hermes-retrieval-scout.json"
+    marker = profile_root / ".retrieval-scout.json"
+    legacy_marker = profile_root / ".hermes-retrieval-scout.json"
     profile_root.mkdir(parents=True, exist_ok=True)
+    if legacy_marker.is_file() and not marker.is_file():
+        try:
+            legacy = json.loads(legacy_marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"invalid legacy scout marker: {legacy_marker}") from exc
+        if legacy.get("owner") != "hermes-retrieval":
+            raise RuntimeError(f"refusing unowned legacy scout profile: {profile_root}")
+        _atomic_text(
+            marker,
+            json.dumps(
+                {"owner": "retrieval", "profile": profile_name},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        legacy_marker.unlink()
     if any(profile_root.iterdir()) and not marker.is_file():
         raise RuntimeError(
             f"refusing to adopt an existing OMP profile: {profile_root}"
@@ -305,7 +356,7 @@ def _prepare_scout_profile(
     _atomic_text(
         marker,
         json.dumps(
-            {"owner": "hermes-retrieval", "profile": profile_name},
+            {"owner": "retrieval", "profile": profile_name},
             indent=2,
             sort_keys=True,
         )
@@ -439,11 +490,27 @@ def _prepare_scout_profile(
     }
 
 
-def integrate_harnesses(settings: Settings) -> dict[str, Any]:
-    """Register the one shared projection root without touching active skills."""
+def _without_legacy_roots(values: list[Any], *, keep: str) -> list[Any]:
+    legacy = {
+        str(
+            Path("~/.local/share/hermes-retrieval/projections/skills")
+            .expanduser()
+            .resolve()
+        ),
+        str((Path("~/.local/share/retrieval/projections/skills").expanduser().resolve())),
+    }
+    return [value for value in values if str(value) == keep or str(value) not in legacy]
 
-    root = str(settings.projection_root)
-    settings.projection_root.mkdir(parents=True, exist_ok=True)
+
+def integrate_harnesses(settings: Settings) -> dict[str, Any]:
+    """Register isolated projection and MCP lanes for Hermes and OMP."""
+
+    hermes_projection = SkillProjection(settings, "hermes")
+    omp_projection = SkillProjection(settings, "omp")
+    hermes_root = str(hermes_projection.root)
+    omp_root = str(omp_projection.root)
+    hermes_projection.root.mkdir(parents=True, exist_ok=True)
+    omp_projection.root.mkdir(parents=True, exist_ok=True)
 
     hermes_changed = False
     if settings.hermes_config.is_file():
@@ -454,8 +521,27 @@ def integrate_harnesses(settings: Settings) -> dict[str, Any]:
         external = hermes_skills.setdefault("external_dirs", [])
         if not isinstance(external, list):
             raise RuntimeError("Hermes skills.external_dirs must be a list")
-        if root not in external:
-            external.append(root)
+        external[:] = [
+            value
+            for value in _without_legacy_roots(external, keep=hermes_root)
+            if str(value) != omp_root
+        ]
+        if hermes_root not in external:
+            external.append(hermes_root)
+        mcp_servers = hermes.setdefault("mcp_servers", {})
+        if not isinstance(mcp_servers, dict):
+            raise RuntimeError("Hermes mcp_servers must be a mapping")
+        server = mcp_servers.setdefault("retrieval", {})
+        if not isinstance(server, dict):
+            raise RuntimeError("Hermes retrieval MCP configuration must be a mapping")
+        server.setdefault("command", str(settings.root / ".venv" / "bin" / "python"))
+        server.setdefault("args", ["-m", "hermes_retrieval.server"])
+        server.setdefault("connect_timeout", 120.0)
+        server["enabled"] = True
+        environment = server.setdefault("env", {})
+        if not isinstance(environment, dict):
+            raise RuntimeError("Hermes retrieval MCP env must be a mapping")
+        environment["RETRIEVAL_HARNESS"] = "hermes"
         hermes_changed = _write_yaml_if_changed(settings.hermes_config, hermes)
 
     omp_changed = False
@@ -468,25 +554,56 @@ def integrate_harnesses(settings: Settings) -> dict[str, Any]:
         custom = omp_skills.setdefault("customDirectories", [])
         if not isinstance(custom, list):
             raise RuntimeError("OMP skills.customDirectories must be a list")
-        if root not in custom:
-            custom.append(root)
+        custom[:] = [
+            value
+            for value in _without_legacy_roots(custom, keep=omp_root)
+            if str(value) != hermes_root
+        ]
+        if omp_root not in custom:
+            custom.append(omp_root)
         omp_changed = _write_yaml_if_changed(settings.omp_config, omp)
         scout_profile = _prepare_scout_profile(settings, omp)
 
+    omp_mcp_changed = False
+    if settings.omp_config.is_file():
+        omp_mcp = _load_json(settings.omp_mcp_config)
+        omp_mcp.setdefault(
+            "$schema",
+            "https://raw.githubusercontent.com/can1357/oh-my-pi/main/"
+            "packages/coding-agent/src/config/mcp-schema.json",
+        )
+        servers = omp_mcp.setdefault("mcpServers", {})
+        if not isinstance(servers, dict):
+            raise RuntimeError("OMP mcpServers must be an object")
+        server = servers.setdefault("retrieval", {})
+        if not isinstance(server, dict):
+            raise RuntimeError("OMP retrieval MCP configuration must be an object")
+        server.setdefault("type", "stdio")
+        server.setdefault("command", str(settings.root / "start.sh"))
+        server.setdefault("cwd", str(settings.root))
+        environment = server.setdefault("env", {})
+        if not isinstance(environment, dict):
+            raise RuntimeError("OMP retrieval MCP env must be an object")
+        environment["RETRIEVAL_HARNESS"] = "omp"
+        omp_mcp_changed = _write_json_if_changed(settings.omp_mcp_config, omp_mcp)
+
     return {
-        "projection_root": root,
+        "projection_root": str(settings.projection_root),
         "hermes": {
             "config": str(settings.hermes_config),
             "available": settings.hermes_config.is_file(),
             "changed": hermes_changed,
+            "projection": hermes_root,
             "reload": "/reload-skills",
         },
         "omp": {
             "config": str(settings.omp_config),
+            "mcp_config": str(settings.omp_mcp_config),
             "available": settings.omp_config.is_file(),
-            "changed": omp_changed,
+            "changed": omp_changed or omp_mcp_changed,
+            "projection": omp_root,
             "reload": "/reload",
             "scout_profile": scout_profile,
         },
-        "restart_required": False,
+        "restart_required": hermes_changed or omp_changed or omp_mcp_changed,
     }

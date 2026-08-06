@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import logging
 from pathlib import Path
@@ -18,8 +19,11 @@ from .skill_admin import SkillAdmin, SkillAdminError
 from .source_admin import SourceRegistry
 
 
+_HARNESSES = ("hermes", "omp")
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hermes-retrieval")
+    parser = argparse.ArgumentParser(prog="retrieval")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
     sync = sub.add_parser("sync")
@@ -36,13 +40,26 @@ def _parser() -> argparse.ArgumentParser:
         help="run the isolated scout and project at most one selected skill",
     )
     retrieve.add_argument("query")
+    retrieve.add_argument("--harness", choices=_HARNESSES)
     projected = sub.add_parser("projected")
     projected_commands = projected.add_subparsers(
         dest="projected_command", required=True
     )
-    projected_commands.add_parser("list")
+    projected_list = projected_commands.add_parser("list")
+    projected_list.add_argument(
+        "--harness", choices=("all", *_HARNESSES), default="all"
+    )
     projected_clear = projected_commands.add_parser("clear")
     projected_clear.add_argument("skill_ids", nargs="*")
+    projected_clear.add_argument(
+        "--harness", choices=("all", *_HARNESSES), default="all"
+    )
+    projected_clear.add_argument(
+        "--all",
+        action="store_true",
+        dest="clear_all",
+        help="explicitly remove every projected skill in the selected lane(s)",
+    )
     catalog = sub.add_parser("catalog")
     catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
     catalog_commands.add_parser("sync")
@@ -82,7 +99,7 @@ def _parser() -> argparse.ArgumentParser:
     references.add_argument("--max-chars", type=int, default=8000)
     sub.add_parser(
         "integrate",
-        help="register the shared projection directory with Hermes and OMP",
+        help="register isolated projection and MCP lanes with Hermes and OMP",
     )
     find = sub.add_parser("find-skills")
     find.add_argument("query")
@@ -160,7 +177,7 @@ def _run_skills(args: argparse.Namespace) -> None:
             return
         raise AssertionError(args.skills_command)
     except (SkillAdminError, OSError, ValueError) as exc:
-        print(f"hermes-retrieval: {exc}", file=sys.stderr)
+        print(f"retrieval: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
 
@@ -168,7 +185,7 @@ def _run_watcher() -> None:
     service = RetrievalService()
     if not service.settings.watch_enabled:
         print(
-            "hermes-retrieval: source watching is disabled by "
+            "retrieval: source watching is disabled by "
             "RETRIEVAL_WATCH_ENABLED",
             file=sys.stderr,
         )
@@ -224,6 +241,106 @@ def _print_catalog_audit(report: dict[str, object]) -> None:
             "Add exact IDs to category-overrides.toml using categories from "
             "taxonomy.toml, then rerun catalog audit and sync."
         )
+
+
+def _selected_harnesses(value: str) -> tuple[str, ...]:
+    return _HARNESSES if value == "all" else (value,)
+
+
+def _projection_snapshot(settings: Settings, harnesses: tuple[str, ...]) -> dict:
+    return {
+        harness: SkillProjection(settings, harness).list()
+        for harness in harnesses
+    }
+
+
+def _interactive_projection_selection(snapshot: dict) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str, dict]] = []
+    for harness, report in snapshot.items():
+        for row in report["skills"]:
+            rows.append((harness, str(row["item_id"]), row))
+    if not rows:
+        print("No projected skills are present.")
+        return []
+    print("Projected skills:")
+    for index, (harness, item_id, row) in enumerate(rows, start=1):
+        print(
+            f"  {index:>3}. [{harness}] {row.get('name') or item_id}\n"
+            f"       {item_id}"
+        )
+    answer = input(
+        "Select numbers to clear (comma/space separated), 'all', or Enter to cancel: "
+    ).strip()
+    if not answer:
+        return []
+    if answer.casefold() == "all":
+        return [(harness, item_id) for harness, item_id, _row in rows]
+    tokens = [value for value in re.split(r"[\s,]+", answer) if value]
+    selected: list[tuple[str, str]] = []
+    for token in tokens:
+        if not token.isdecimal() or not 1 <= int(token) <= len(rows):
+            raise ValueError(f"invalid checklist selection: {token}")
+        harness, item_id, _row = rows[int(token) - 1]
+        if (harness, item_id) not in selected:
+            selected.append((harness, item_id))
+    return selected
+
+
+def _run_projected(args: argparse.Namespace) -> dict:
+    settings = Settings.load()
+    harnesses = _selected_harnesses(args.harness)
+    snapshot = _projection_snapshot(settings, harnesses)
+    if args.projected_command == "list":
+        return {"lanes": snapshot}
+    if args.clear_all and args.skill_ids:
+        raise ValueError("use either explicit skill IDs or --all, not both")
+
+    chosen: list[tuple[str, str]]
+    if args.clear_all:
+        chosen = [
+            (harness, str(row["item_id"]))
+            for harness, report in snapshot.items()
+            for row in report["skills"]
+        ]
+    elif args.skill_ids:
+        requested = list(dict.fromkeys(args.skill_ids))
+        chosen = [
+            (harness, item_id)
+            for harness, report in snapshot.items()
+            for item_id in requested
+            if any(str(row["item_id"]) == item_id for row in report["skills"])
+        ]
+        matched = {item_id for _harness, item_id in chosen}
+        missing = [item_id for item_id in requested if item_id not in matched]
+        if missing:
+            raise ValueError(
+                "unknown projected skill IDs in selected lane(s): "
+                + ", ".join(missing)
+            )
+    else:
+        if not sys.stdin.isatty():
+            raise ValueError(
+                "projected clear requires skill IDs, --all, or an interactive terminal"
+            )
+        chosen = _interactive_projection_selection(snapshot)
+
+    results = {}
+    for harness in harnesses:
+        ids = [item_id for lane, item_id in chosen if lane == harness]
+        if not ids:
+            results[harness] = {
+                "harness": harness,
+                "removed": [],
+                "remaining": len(snapshot[harness]["skills"]),
+                "reload": snapshot[harness]["reload"],
+            }
+            continue
+        results[harness] = SkillProjection(settings, harness).clear(ids)
+    return {
+        "lanes": results,
+        "removed": sum(len(row["removed"]) for row in results.values()),
+        "canonical_sources_untouched": True,
+    }
 
 
 def main() -> None:
@@ -302,15 +419,17 @@ def main() -> None:
         print(json.dumps(result, indent=2, sort_keys=True))
         return
     if args.command == "projected":
-        projection = SkillProjection(Settings.load())
-        result = (
-            projection.list()
-            if args.projected_command == "list"
-            else projection.clear(args.skill_ids or None)
-        )
+        try:
+            result = _run_projected(args)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"retrieval: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
         print(json.dumps(result, indent=2, sort_keys=True))
         return
-    service = RetrievalService()
+    settings = Settings.load()
+    if args.command == "retrieve" and args.harness:
+        settings = replace(settings, target_harness=args.harness)
+    service = RetrievalService(settings)
     if args.command == "status":
         result = service.status()
     elif args.command == "sync":

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-command_path="$root/.venv/bin/hermes-retrieval"
+command_path="$root/.venv/bin/retrieval"
 unit_name="hermes-retrieval-watcher.service"
 unit_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit_path="$unit_root/$unit_name"
@@ -28,7 +28,7 @@ render_launcher() {
 render_unit() {
   cat <<'EOF'
 [Unit]
-Description=Hermes Retrieval source watcher
+Description=Retrieval source watcher
 Documentation=https://github.com/CommanderTurtle/retrieval
 
 [Service]
@@ -73,11 +73,11 @@ case "$action" in
       systemctl --user status --no-pager "$unit_name" >&2 || true
       exit 1
     }
-    printf 'Hermes Retrieval watcher is active and source-driven.\n'
+    printf 'Retrieval watcher is active and source-driven.\n'
     ;;
   status)
     watcher_current
-    printf 'Hermes Retrieval watcher is current and active.\n'
+    printf 'Retrieval watcher is current and active.\n'
     ;;
   *)
     printf 'Usage: %s [install|status]\n' "$0" >&2

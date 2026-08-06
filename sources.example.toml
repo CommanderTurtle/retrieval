@@ -26,6 +26,7 @@ kind = "skills"
 path = "~/.hermes/skills"
 enabled = true
 state = "native"
+harness = "hermes"
 
 [[sources]]
 name = "hermes-archived-skills"
@@ -33,6 +34,7 @@ kind = "skills"
 path = "~/.hermes/skills/.archive"
 enabled = true
 state = "archived"
+harness = "hermes"
 
 # OMP-native skills with `hide: true` or `disable-model-invocation: true`
 # become searchable as `hidden`; advertised native skills remain excluded.
@@ -42,6 +44,25 @@ kind = "skills"
 path = "~/.omp/agent/skills"
 enabled = true
 state = "native"
+harness = "omp"
+
+# Explicit OMP custom directories are native sources too. Projection lanes are
+# deliberately excluded to prevent a selected copy feeding back into catalog.
+[[sources]]
+name = "omp-retrieval-skills"
+kind = "skills"
+path = "${HERMES_PROJECTS_DIR}/retrieval/skills"
+enabled = true
+state = "native"
+harness = "omp"
+
+[[sources]]
+name = "omp-persephone-skills"
+kind = "skills"
+path = "${HERMES_PROJECTS_DIR}/persephone/skills"
+enabled = true
+state = "native"
+harness = "omp"
 
 # Persistent human-owned intake. Clone any future specialist skill repository
 # below this directory; the watcher sees nested SKILL.md changes automatically.

@@ -245,11 +245,12 @@ class RetrievalScout:
 
     def _environment(self) -> dict[str, str]:
         profile_root = self._profile_agent_dir()
-        marker = profile_root / ".hermes-retrieval-scout.json"
-        if not marker.is_file():
+        marker = profile_root / ".retrieval-scout.json"
+        legacy_marker = profile_root / ".hermes-retrieval-scout.json"
+        if not marker.is_file() and not legacy_marker.is_file():
             raise RuntimeError(
                 "isolated Retrieval Scout profile is missing; run "
-                "hermes-retrieval integrate"
+                "retrieval integrate"
             )
         home = self.settings.scout_home
         for path in (

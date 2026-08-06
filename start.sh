@@ -10,4 +10,13 @@ venv_python="$root/.venv/bin/python"
   exit 1
 }
 
+export RETRIEVAL_HARNESS="${RETRIEVAL_HARNESS:-hermes}"
+case "$RETRIEVAL_HARNESS" in
+  hermes|omp) ;;
+  *)
+    printf 'RETRIEVAL_HARNESS must be hermes or omp.\n' >&2
+    exit 2
+    ;;
+esac
+
 exec "$venv_python" -m hermes_retrieval.server

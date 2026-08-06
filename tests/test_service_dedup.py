@@ -3,7 +3,29 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from hermes_retrieval.service import RetrievalService
+from hermes_retrieval.service import RetrievalService, _skill_state_for_harness
+
+
+def test_skill_state_is_scoped_to_the_target_harness() -> None:
+    entry = {
+        "state": "native",
+        "native_harnesses": ["hermes"],
+        "hidden_harnesses": [],
+    }
+
+    assert _skill_state_for_harness(entry, "hermes") is None
+    assert _skill_state_for_harness(entry, "omp") == "cold"
+
+
+def test_hidden_skill_is_installed_only_in_its_own_harness() -> None:
+    entry = {
+        "state": "hidden",
+        "native_harnesses": [],
+        "hidden_harnesses": ["omp"],
+    }
+
+    assert _skill_state_for_harness(entry, "hermes") == "cold"
+    assert _skill_state_for_harness(entry, "omp") == "hidden"
 
 
 def test_find_skills_deduplicates_same_file_across_sources(tmp_path: Path) -> None:
@@ -11,6 +33,7 @@ def test_find_skills_deduplicates_same_file_across_sources(tmp_path: Path) -> No
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: sample\n---\n", encoding="utf-8")
     service = object.__new__(RetrievalService)
+    service.settings = SimpleNamespace(target_harness="hermes")
     service.index = SimpleNamespace(
         search=lambda *_args, **_kwargs: [
             SimpleNamespace(
@@ -67,6 +90,7 @@ def test_find_skills_deduplicates_same_named_variants(tmp_path: Path) -> None:
     first.write_text("---\nname: humanizer\n---\n", encoding="utf-8")
     second.write_text("---\nname: humanizer\n---\n", encoding="utf-8")
     service = object.__new__(RetrievalService)
+    service.settings = SimpleNamespace(target_harness="hermes")
     service.index = SimpleNamespace(
         search=lambda *_args, **_kwargs: [
             SimpleNamespace(

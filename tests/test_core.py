@@ -52,9 +52,13 @@ def test_native_hidden_skill_becomes_a_dormant_candidate(tmp_path: Path):
         "---\nname: secret\ndescription: Hidden helper.\nhide: true\n---\n# Secret",
         encoding="utf-8",
     )
-    source = SourceConfig("omp", "skills", tmp_path / "omp", state="native")
+    source = SourceConfig(
+        "omp", "skills", tmp_path / "omp", state="native", harness="omp"
+    )
 
-    assert list(iter_skills(source))[0].metadata["state"] == "hidden"
+    document = list(iter_skills(source))[0]
+    assert document.metadata["state"] == "hidden"
+    assert document.metadata["native_harness"] == "omp"
 
 
 def test_hermes_archive_is_separate_from_native_parent(tmp_path: Path):

@@ -27,6 +27,35 @@ from .sources import (
 from .scout import RetrievalScout
 
 
+def _skill_state_for_harness(
+    entry: dict[str, Any],
+    harness: str,
+) -> str | None:
+    """Return the target-local state, or None when already natively active."""
+
+    state = str(entry.get("state") or "cold")
+    singular = str(entry.get("native_harness") or "")
+    native = {
+        str(value)
+        for value in entry.get("native_harnesses") or []
+        if str(value) in {"hermes", "omp"}
+    }
+    hidden = {
+        str(value)
+        for value in entry.get("hidden_harnesses") or []
+        if str(value) in {"hermes", "omp"}
+    }
+    if state == "native" and not native:
+        native = {singular} if singular in {"hermes", "omp"} else {"hermes", "omp"}
+    if state == "hidden" and not hidden:
+        hidden = {singular} if singular in {"hermes", "omp"} else {"hermes", "omp"}
+    if harness in native:
+        return None
+    if harness in hidden:
+        return "hidden"
+    return "archived" if state == "archived" else "cold"
+
+
 class RetrievalService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings.load()
@@ -34,7 +63,10 @@ class RetrievalService:
         self.archive = ArchiveStore(self.settings.archive_db)
         self.index = RetrievalIndex(self.settings)
         self.catalog = IweCatalog(self.settings, self.sources)
-        self.projections = SkillProjection(self.settings)
+        self.projections = SkillProjection(
+            self.settings,
+            self.settings.target_harness,
+        )
         self.scout = RetrievalScout(self.settings)
         self._write_mutex = threading.RLock()
         self._watcher: SourceRefreshWatcher | None = None
@@ -156,7 +188,11 @@ class RetrievalService:
         }
         result["watcher"] = watcher
         result["catalog"] = self.catalog.stats()
-        result["projections"] = self.projections.list()
+        result["projections"] = {
+            harness: SkillProjection(self.settings, harness).list()
+            for harness in ("hermes", "omp")
+        }
+        result["target_harness"] = self.settings.target_harness
         return result
 
     def sync(
@@ -338,13 +374,19 @@ class RetrievalService:
         iwe = self.catalog.find(
             query,
             limit=max(limit * 4, 20),
-            states={"hidden", "cold", "archived"},
+            states={"native", "hidden", "cold", "archived"},
         )
         ranked: dict[str, dict[str, Any]] = {}
 
         def row_for(item_id: str) -> dict[str, Any] | None:
             entry = entries.get(item_id)
-            if not entry or entry.get("state") not in {"hidden", "cold", "archived"}:
+            if not entry:
+                return None
+            effective_state = _skill_state_for_harness(
+                entry,
+                self.settings.target_harness,
+            )
+            if effective_state is None:
                 return None
             return ranked.setdefault(
                 item_id,
@@ -353,7 +395,10 @@ class RetrievalService:
                     "name": entry["title"],
                     "description": entry.get("description", ""),
                     "repository": entry["source"],
-                    "state": entry["state"],
+                    "state": effective_state,
+                    "catalog_state": entry["state"],
+                    "native_harnesses": entry.get("native_harnesses", []),
+                    "hidden_harnesses": entry.get("hidden_harnesses", []),
                     "categories": entry.get("categories", []),
                     "path": entry["canonical_path"],
                     "rank_score": 0.0,
@@ -427,11 +472,19 @@ class RetrievalService:
         content = Path(entry["canonical_path"]).read_text(
             encoding="utf-8", errors="replace"
         )
+        effective_state = _skill_state_for_harness(
+            entry,
+            self.settings.target_harness,
+        )
+        if effective_state is None:
+            raise ValueError(
+                f"skill is already active in {self.settings.target_harness}: {skill_id}"
+            )
         return {
             "skill_id": skill_id,
             "name": entry["title"],
             "description": entry.get("description", ""),
-            "state": entry["state"],
+            "state": effective_state,
             "categories": entry.get("categories", []),
             "canonical_excerpt": content[:12000],
             "iwe_graph": context["graph"],
@@ -449,41 +502,78 @@ class RetrievalService:
         if not skill_id:
             return {
                 "query": query,
+                "harness": self.settings.target_harness,
                 "selection": selection,
                 "skill": None,
                 "projection": None,
             }
         entry = self.catalog.entry(str(skill_id))
-        if entry["state"] not in {"hidden", "cold", "archived"}:
-            raise RuntimeError("Retrieval Scout may return only dormant skills")
+        effective_state = _skill_state_for_harness(
+            entry,
+            self.settings.target_harness,
+        )
+        if effective_state is None:
+            raise RuntimeError(
+                "Retrieval Scout returned a skill already active in this harness"
+            )
         canonical = Path(entry["canonical_path"])
         content = canonical.read_text(encoding="utf-8", errors="replace")
+        hidden_harnesses = set(entry.get("hidden_harnesses") or [])
+        native_harness = str(entry.get("native_harness") or "")
+        if entry["state"] == "hidden" and not hidden_harnesses and native_harness:
+            hidden_harnesses.add(native_harness)
+        already_installed = (
+            effective_state == "hidden"
+            and self.settings.target_harness in hidden_harnesses
+        )
         projection = (
             None
-            if entry["state"] == "hidden"
-            else self.projections.project(entry)
+            if already_installed
+            else self.projections.project({**entry, "state": effective_state})
+        )
+        reload_command = (
+            "/reload-skills"
+            if self.settings.target_harness == "hermes"
+            else "/reload"
         )
         return {
             "query": query,
+            "harness": self.settings.target_harness,
             "selection": selection,
             "skill": {
                 "skill_id": skill_id,
                 "name": entry["title"],
                 "source": entry["source"],
-                "state": entry["state"],
+                "state": effective_state,
+                "catalog_state": entry["state"],
+                "native_harness": native_harness,
+                "native_harnesses": entry.get("native_harnesses", []),
+                "hidden_harnesses": entry.get("hidden_harnesses", []),
                 "canonical_path": str(canonical),
                 "content": content,
                 "verbatim": True,
             },
             "projection": projection,
+            "activation": {
+                "current_turn": "active-from-verbatim-tool-result",
+                "persisted": (
+                    "native-hidden-skill"
+                    if already_installed
+                    else "harness-projection"
+                ),
+                "reload_command": reload_command,
+                "reload_executed": False,
+            },
             "instruction": (
-                "Use the returned SKILL.md immediately. This hidden skill is already "
-                "installed and intentionally absent from OMP prompt metadata; no copy "
-                "or reload was performed."
-                if entry["state"] == "hidden"
+                "Use the returned SKILL.md immediately. It is already installed in "
+                f"{self.settings.target_harness} but intentionally hidden from native "
+                "prompt metadata. No duplicate was created."
+                if already_installed
                 else "Use the returned SKILL.md immediately. The complete package is "
-                "also projected for durable discovery; run /reload-skills in Hermes "
-                "or /reload in OMP to refresh the current process without restarting."
+                f"also projected only into the {self.settings.target_harness} lane. "
+                f"Run {reload_command} in that harness when its native skill registry "
+                "must discover the copy; a stdio MCP cannot invoke an interactive "
+                "slash command on the host's behalf."
             ),
         }
 
@@ -560,15 +650,6 @@ class RetrievalService:
                 "paths and headings are included for verification."
             ),
         }
-
-    def list_retrieved_skills(self) -> dict[str, Any]:
-        return self.projections.list()
-
-    def clear_retrieved_skills(
-        self,
-        skill_ids: list[str] | None = None,
-    ) -> dict[str, Any]:
-        return self.projections.clear(skill_ids)
 
     def find_skills(self, query: str, limit: int = 8) -> dict[str, Any]:
         result = self.search_skills(query, limit)

@@ -17,6 +17,11 @@ class SourceConfig:
     # searchable while dormant. A skill may refine a native source to hidden
     # through its own frontmatter; Chroma and IWE never own this state.
     state: str = "cold"
+    # Native provenance matters only when a hidden skill is selected. A skill
+    # already installed in its owning harness can be returned verbatim without
+    # manufacturing a duplicate there, while the other harness still receives
+    # an isolated projection copy.
+    harness: str = ""
 
 
 @dataclass(frozen=True)
@@ -45,4 +50,3 @@ class SearchHit:
     @property
     def score(self) -> float:
         return max(-1.0, min(1.0, 1.0 - self.distance))
-

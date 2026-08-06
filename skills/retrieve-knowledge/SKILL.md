@@ -11,17 +11,21 @@ selection to an ephemeral OMP process that can only search and read its IWE
 catalog. It returns at most one canonical `SKILL.md` verbatim, so apply those
 instructions immediately.
 
-For cold or archived skills, Retrieval also copies the complete selected
-package into its dedicated shared projection directory. Hidden OMP skills are
-already installed and are returned without a duplicate copy. The current
-process does not automatically rescan projected skills:
+Retrieval knows whether this MCP process belongs to Hermes or OMP and can write
+only to that harness's dedicated projection lane. It copies the complete
+selected package there unless the same hidden skill is already installed in its
+owning harness. The exact `SKILL.md` in the tool result is authoritative for the
+current turn. An out-of-process stdio MCP cannot invoke an interactive host
+slash command, so native discovery for later turns is refreshed explicitly:
 
 - Hermes: run `/reload-skills` when future turns must discover the projection.
 - OMP: run `/reload` for the same reason.
 
-Use `list_retrieved_skills` to inspect those temporary packages and
-`clear_retrieved_skills` when they are no longer relevant. Clear only through
-that tool; it is manifest-guarded and cannot remove canonical or native skills.
+Do not attempt to maintain projections through MCP. A human can inspect both
+lanes with `retrieval projected list` and remove selected copies through the
+interactive `retrieval projected clear` checklist or explicit exact IDs. Those
+CLI operations are manifest-guarded and cannot remove canonical or native
+skills.
 
 Do not use Retrieval for source-code graphs, ordinary web research, or curated
 wiki synthesis. Use codebase-memory, Firecrawl/Camofox, and Librarian for those

@@ -68,7 +68,7 @@ def test_iwe_find_filters_native_entries(
     root = tmp_path / "catalog"
     root.mkdir()
     payload = {
-        "version": 2,
+        "version": 3,
         "entries": {
             "cold:a": {
                 "item_id": "cold:a",
@@ -130,7 +130,15 @@ def test_hidden_native_skill_is_graphed_without_exposing_active_neighbor(
     )
     catalog = IweCatalog(
         _settings(tmp_path, tmp_path / "catalog"),
-        [SourceConfig("omp", "skills", tmp_path / "native", state="native")],
+        [
+            SourceConfig(
+                "omp",
+                "skills",
+                tmp_path / "native",
+                state="native",
+                harness="omp",
+            )
+        ],
     )
     monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
     monkeypatch.setattr(
@@ -140,10 +148,12 @@ def test_hidden_native_skill_is_graphed_without_exposing_active_neighbor(
 
     report = catalog.sync()
 
-    assert report["entries"] == 1
+    assert report["entries"] == 2
     assert report["hidden"] == 1
-    assert report["native_excluded"] == 1
+    assert report["native_excluded"] == 0
     assert catalog.entry("omp:packet-hidden")["state"] == "hidden"
+    assert catalog.entry("omp:packet-hidden")["native_harness"] == "omp"
+    assert catalog.entry("omp:packet-active")["native_harnesses"] == ["omp"]
 
 
 def test_native_name_suppresses_duplicate_cold_skill(
@@ -179,6 +189,47 @@ def test_native_name_suppresses_duplicate_cold_skill(
     assert report["entries"] == 0
     assert report["native_excluded"] == 1
     assert catalog.entries() == {}
+
+
+def test_native_skill_remains_available_to_the_other_harness(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    skill = tmp_path / "hermes" / "native-only" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: Native Only\ndescription: Audit network security packets.\n---\n"
+        "# Native Only\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "catalog"
+    catalog = IweCatalog(
+        _settings(tmp_path, root),
+        [
+            SourceConfig(
+                "hermes",
+                "skills",
+                tmp_path / "hermes",
+                state="native",
+                harness="hermes",
+            )
+        ],
+    )
+    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
+    monkeypatch.setattr(
+        "hermes_retrieval.catalog.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    report = catalog.sync()
+    entry = catalog.entry("hermes:native-only")
+
+    assert report["entries"] == 1
+    assert report["native_excluded"] == 0
+    assert entry["state"] == "native"
+    assert entry["native_harnesses"] == ["hermes"]
 
 
 def test_uncategorized_skill_requires_review_and_is_not_graphed(
