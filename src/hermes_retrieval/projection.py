@@ -390,6 +390,10 @@ def _prepare_scout_profile(
         "modelRoles": roles,
         "startup": {"checkUpdate": False},
         "advisor": {"enabled": False, "subagents": False},
+        "compaction": {
+            "remoteEnabled": False,
+            "remoteStreamingV2Enabled": False,
+        },
         "exa": {
             "enabled": False,
             "enableSearch": False,
