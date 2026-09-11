@@ -10,39 +10,6 @@ uv_bin="$(command -v uv || true)"
   exit 1
 }
 
-projects_dir="${HERMES_PROJECTS_DIR:-$HOME/Hermes}"
-iwe_source="${RETRIEVAL_IWE_SOURCE:-$projects_dir/iwe}"
-if [[ -e "$iwe_source" && ! -d "$iwe_source/.git" ]]; then
-  printf 'IWE source path exists but is not a Git checkout: %s\n' "$iwe_source" >&2
-  exit 1
-fi
-if [[ ! -d "$iwe_source/.git" ]]; then
-  git_bin="$(command -v git || true)"
-  [[ -n "$git_bin" ]] || {
-    printf 'git is required to maintain the IWE source checkout.\n' >&2
-    exit 1
-  }
-  mkdir -p -- "$(dirname -- "$iwe_source")"
-  "$git_bin" clone --filter=blob:none https://github.com/iwe-org/iwe.git "$iwe_source"
-fi
-
-iwe_bin="$(command -v iwe || true)"
-if [[ -z "$iwe_bin" && -x "$HOME/.cargo/bin/iwe" ]]; then
-  iwe_bin="$HOME/.cargo/bin/iwe"
-fi
-if [[ -z "$iwe_bin" ]]; then
-  cargo_bin="$(command -v cargo || true)"
-  [[ -n "$cargo_bin" ]] || {
-    printf 'IWE requires a native Rust toolchain (cargo): https://rustup.rs/\n' >&2
-    exit 1
-  }
-  # Build only the stable CLI integration surface from the visible checkout.
-  "$cargo_bin" install --path "$iwe_source/crates/iwe" --locked
-  iwe_bin="$HOME/.cargo/bin/iwe"
-fi
-export RETRIEVAL_IWE_COMMAND="${RETRIEVAL_IWE_COMMAND:-$iwe_bin}"
-export RETRIEVAL_IWE_SOURCE="${RETRIEVAL_IWE_SOURCE:-$iwe_source}"
-
 if [[ ! -f .env ]]; then
   cp -- .env.example .env
 fi
@@ -69,8 +36,12 @@ venv_python="$root/.venv/bin/python"
   exit 1
 }
 "$uv_bin" sync --frozen --python "$venv_python"
+chmod +x -- "$root/hooks/session-close.sh"
+chmod +x -- "$root/scripts/remove-legacy-iwe.sh"
+"$root/scripts/remove-legacy-iwe.sh"
 "$venv_python" -c 'from hermes_retrieval.config import Settings; Settings.load().skill_intake_root.mkdir(parents=True, exist_ok=True)'
-"$venv_python" -m hermes_retrieval.cli catalog sync
+"$venv_python" -m hermes_retrieval.cli session-close --harness hermes --all-profiles
+"$venv_python" -m hermes_retrieval.cli session-close --harness omp --all-profiles
 "$venv_python" -m hermes_retrieval.cli integrate
 
 printf 'Retrieval is ready in %s\n' "$root"

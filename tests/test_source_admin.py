@@ -20,7 +20,6 @@ def test_source_registration_dry_run_is_non_mutating(tmp_path: Path) -> None:
         sources_file=sources_file,
         sources=lambda: [],
         catalog_root=tmp_path / "catalog",
-        iwe_command="iwe",
         taxonomy_file=Path(__file__).parents[1] / "taxonomy.toml",
         category_overrides_file=tmp_path / "category-overrides.toml",
     )

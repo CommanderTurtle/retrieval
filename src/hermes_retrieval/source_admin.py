@@ -9,7 +9,7 @@ import tempfile
 import tomllib
 from typing import Any
 
-from .catalog import IweCatalog
+from .catalog import RetrievalCatalog
 from .config import Settings
 
 
@@ -95,7 +95,7 @@ class SourceRegistry:
         if state not in {"cold", "archived"}:
             raise ValueError("registered intake sources must be cold or archived")
         candidate = self._validate(name, path)
-        catalog = IweCatalog(self.settings, self.settings.sources())
+        catalog = RetrievalCatalog(self.settings, self.settings.sources())
         audit = catalog.audit_path(candidate, name)
         result: dict[str, Any] = {
             "name": name,

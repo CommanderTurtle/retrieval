@@ -15,7 +15,7 @@ class SourceConfig:
     # are installed but deliberately omitted from OMP's prompt metadata,
     # ``cold`` skills live only in Retrieval, and ``archived`` skills remain
     # searchable while dormant. A skill may refine a native source to hidden
-    # through its own frontmatter; Chroma and IWE never own this state.
+    # through its own frontmatter; neither search index owns this state.
     state: str = "cold"
     # Native provenance matters only when a hidden skill is selected. A skill
     # already installed in its owning harness can be returned verbatim without

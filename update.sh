@@ -17,4 +17,10 @@ venv_python="$root/.venv/bin/python"
 
 git pull --ff-only
 "$uv_bin" sync --frozen --python "$venv_python"
-printf 'Hermes Retrieval updated. Restart the Hermes gateway to reload its MCP process.\n'
+chmod +x -- "$root/hooks/session-close.sh"
+chmod +x -- "$root/scripts/remove-legacy-iwe.sh"
+"$root/scripts/remove-legacy-iwe.sh"
+"$venv_python" -m hermes_retrieval.cli session-close --harness hermes --all-profiles
+"$venv_python" -m hermes_retrieval.cli session-close --harness omp --all-profiles
+"$venv_python" -m hermes_retrieval.cli integrate
+printf 'Retrieval updated. Restart OMP/Hermes MCP processes to reload code.\n'

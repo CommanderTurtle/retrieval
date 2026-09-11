@@ -7,22 +7,28 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
-import subprocess
 import tempfile
 from typing import Any, Iterable
 
 import yaml
 
 from .config import Settings
+from .graph_index import IntegratedGraphIndex, catalog_tree
 from .models import SourceConfig
 from .sources import iter_skills
 from .taxonomy import Taxonomy, load_category_overrides, load_taxonomy
 
 
 _MANIFEST = ".retrieval-catalog.json"
-_MANIFEST_VERSION = 3
+_MANIFEST_VERSION = 5
 _STATE_PRIORITY = {"archived": 1, "cold": 2, "hidden": 3, "native": 4}
+_BUNDLE_IGNORES = {
+    ".git",
+    ".retrieval-intake.json",
+    ".retrieval-projection.json",
+    "__pycache__",
+    "node_modules",
+}
 
 
 def _slug(value: str, fallback: str = "item") -> str:
@@ -108,8 +114,36 @@ def _atomic_text(path: Path, content: str) -> bool:
     return True
 
 
-class IweCatalog:
-    """Disposable IWE graph derived from explicitly configured skill sources."""
+def bundle_digest(skill_path: Path) -> str:
+    """Hash a complete skill package without following links outside it."""
+
+    root = skill_path.parent.resolve()
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda value: value.as_posix()):
+        relative = path.relative_to(root)
+        if any(part in _BUNDLE_IGNORES for part in relative.parts):
+            continue
+        if path.is_symlink():
+            digest.update(b"L\0")
+            digest.update(relative.as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+            continue
+        if not path.is_file():
+            continue
+        digest.update(b"F\0")
+        digest.update(relative.as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as stream:
+            while piece := stream.read(1024 * 1024):
+                digest.update(piece)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+class RetrievalCatalog:
+    """Disposable integrated graph derived from configured skill sources."""
 
     def __init__(self, settings: Settings, sources: Iterable[SourceConfig]):
         self.settings = settings
@@ -125,20 +159,6 @@ class IweCatalog:
         return taxonomy, load_category_overrides(
             self.settings.category_overrides_file,
             taxonomy,
-        )
-
-    def _iwe(self) -> str:
-        configured = os.path.expanduser(self.settings.iwe_command)
-        if os.path.sep in configured:
-            path = Path(configured)
-            if path.is_file() and os.access(path, os.X_OK):
-                return str(path)
-        found = shutil.which(configured)
-        if found:
-            return found
-        raise RuntimeError(
-            "IWE is not installed; run cargo install iwe iwes --locked "
-            "or set RETRIEVAL_IWE_COMMAND"
         )
 
     def manifest(self) -> dict[str, Any]:
@@ -190,6 +210,7 @@ class IweCatalog:
                 stem = _slug(document.title, _slug(Path(canonical_path).parent.name))
                 digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:8]
                 card = f"skills/{_slug(source.name)}/{stem}-{digest}.md"
+                package_hash = bundle_digest(Path(canonical_path))
                 state = str(document.metadata.get("state") or source.state)
                 native_harnesses = (
                     [source.harness]
@@ -218,7 +239,11 @@ class IweCatalog:
                     "categories": categories,
                     "tags": tags,
                     "card": card,
-                    "iwe_key": card[:-3],
+                    "graph_key": card[:-3],
+                    "package_hash": package_hash,
+                    "duplicate_paths": [canonical_path],
+                    "duplicate_sources": [source.name],
+                    "duplicate_item_ids": [item_id],
                     "descriptor": document.content,
                 })
 
@@ -236,6 +261,17 @@ class IweCatalog:
                             *(other.get(key) or []),
                         ]
                         if str(value) in {"hermes", "omp"}
+                    }
+                )
+            for key in ("duplicate_paths", "duplicate_sources", "duplicate_item_ids"):
+                merged[key] = sorted(
+                    {
+                        str(value)
+                        for value in [
+                            *(preferred.get(key) or []),
+                            *(other.get(key) or []),
+                        ]
+                        if str(value)
                     }
                 )
             return merged
@@ -268,16 +304,18 @@ class IweCatalog:
             else:
                 by_canonical[key] = merge_harnesses(current, entry)
 
-        by_title: dict[str, dict[str, Any]] = {}
+        # Merge only byte-identical packages. Two skills with the same display
+        # name but different contents remain separately addressable.
+        by_package: dict[str, dict[str, Any]] = {}
         for entry in by_canonical.values():
-            key = " ".join(str(entry["title"]).casefold().split())
-            current = by_title.get(key)
+            key = str(entry["package_hash"])
+            current = by_package.get(key)
             if current is None:
-                by_title[key] = entry
+                by_package[key] = entry
             elif prefer(entry, current):
-                by_title[key] = merge_harnesses(entry, current)
+                by_package[key] = merge_harnesses(entry, current)
             else:
-                by_title[key] = merge_harnesses(current, entry)
+                by_package[key] = merge_harnesses(current, entry)
 
         def fully_native(entry: dict[str, Any]) -> bool:
             harnesses = set(entry.get("native_harnesses") or [])
@@ -287,17 +325,17 @@ class IweCatalog:
                 return True
             return harnesses >= {"hermes", "omp"}
 
-        native_excluded = sum(fully_native(entry) for entry in by_title.values())
+        native_excluded = sum(fully_native(entry) for entry in by_package.values())
         native_by_harness = {
             harness: sum(
                 harness in set(entry.get("native_harnesses") or [])
-                for entry in by_title.values()
+                for entry in by_package.values()
             )
             for harness in ("hermes", "omp")
         }
         dormant = {
             str(entry["item_id"]): entry
-            for entry in by_title.values()
+            for entry in by_package.values()
             if not fully_native(entry)
             and entry["state"] in {"native", "hidden", "cold", "archived"}
         }
@@ -319,7 +357,7 @@ class IweCatalog:
             "review": dict(sorted(review.items())),
             "native_excluded": native_excluded,
             "native_by_harness": native_by_harness,
-            "duplicates_excluded": len(candidates) - len(by_title),
+            "duplicates_excluded": len(candidates) - len(by_package),
         }
 
     def audit(self) -> dict[str, Any]:
@@ -372,7 +410,7 @@ class IweCatalog:
             for source in self.sources
             if source.enabled and source.kind == "skills" and source.state == "native"
         ]
-        probe = IweCatalog(self.settings, [*native, candidate])
+        probe = RetrievalCatalog(self.settings, [*native, candidate])
         inventory = probe._inventory()
         entries = {
             item_id: entry
@@ -566,23 +604,6 @@ class IweCatalog:
             )
         )
 
-        initialized = False
-        if not (self.root / ".iwe" / "config.toml").is_file():
-            result = subprocess.run(
-                [self._iwe(), "init", "--auto", "--library", "."],
-                cwd=self.root,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=120,
-                check=False,
-            )
-            if result.returncode not in {0, 2}:
-                raise RuntimeError(
-                    f"IWE initialization failed ({result.returncode}): "
-                    f"{(result.stderr or result.stdout)[-1200:]}"
-                )
-            initialized = result.returncode == 0
         return {
             "root": str(self.root),
             "entries": len(entries),
@@ -595,7 +616,7 @@ class IweCatalog:
             "archived": sum(row["state"] == "archived" for row in entries.values()),
             "files_changed": changed,
             "files_removed": removed,
-            "iwe_initialized": initialized,
+            "graph_index": "integrated-bm25-fuzzy-rrf",
         }
 
     def ensure(self) -> None:
@@ -629,160 +650,49 @@ class IweCatalog:
         if not query:
             raise ValueError("search query must not be empty")
         limit = max(1, min(limit, 50))
-        result = subprocess.run(
-            [
-                self._iwe(),
-                "find",
-                "--fuzzy",
-                query,
-                "--lexical",
-                query,
-                "--limit",
-                str(min(250, limit * 8)),
-                "--format",
-                "json",
-            ],
-            cwd=self.root,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=45,
-            check=False,
-        )
-        if result.returncode:
-            raise RuntimeError(
-                f"IWE search failed ({result.returncode}): {result.stderr[-1200:]}"
-            )
-        try:
-            found = json.loads(result.stdout or "[]")
-        except ValueError as exc:
-            raise RuntimeError("IWE returned invalid JSON") from exc
-        by_key = {row["iwe_key"]: row for row in self.entries().values()}
         allowed = states or {"hidden", "cold", "archived"}
-        rows: list[dict[str, Any]] = []
-        for rank, match in enumerate(found, start=1):
-            if not isinstance(match, dict):
-                continue
-            entry = by_key.get(str(match.get("key") or ""))
-            if not entry or entry["state"] not in allowed:
-                continue
-            rows.append({**entry, "iwe_rank": rank})
-            if len(rows) >= limit:
-                break
-        return rows
+        entries = {
+            item_id: row
+            for item_id, row in self.entries().items()
+            if row.get("state") in allowed
+        }
+        ranked = IntegratedGraphIndex(entries.values()).rank(
+            query,
+            limit=min(250, limit * 8),
+        )
+        return [
+            {**entries[item_id], "graph_rank": rank}
+            for rank, item_id in enumerate(ranked[:limit], start=1)
+        ]
 
     def context(self, item_id: str) -> dict[str, Any]:
         entry = self.entry(item_id)
-        result = subprocess.run(
-            [
-                self._iwe(),
-                "retrieve",
-                "--key",
-                entry["iwe_key"],
-                "--expand-included-by",
-                "1",
-                "--expand-references",
-                "1",
-                "--max-documents",
-                "8",
-                "--max-tokens",
-                "3000",
-                "--max-document-tokens",
-                "1200",
-                "--format",
-                "json",
-            ],
-            cwd=self.root,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=45,
-            check=False,
-        )
-        if result.returncode:
-            raise RuntimeError(
-                f"IWE retrieval failed ({result.returncode}): {result.stderr[-1200:]}"
-            )
-        try:
-            graph = json.loads(result.stdout or "[]")
-        except ValueError as exc:
-            raise RuntimeError("IWE returned invalid graph JSON") from exc
+        graph = IntegratedGraphIndex(self.entries().values()).context(item_id)
         return {"entry": entry, "graph": graph}
+
+    def browse(self) -> dict[str, Any]:
+        self.ensure()
+        manifest = self.manifest()
+        return catalog_tree(
+            (
+                dict(value)
+                for value in manifest.get("entries", {}).values()
+                if isinstance(value, dict)
+            ),
+            (
+                dict(value)
+                for value in manifest.get("review", {}).values()
+                if isinstance(value, dict)
+            ),
+        )
 
     def stats(self) -> dict[str, Any]:
         manifest = self.manifest()
         entries = list(manifest.get("entries", {}).values())
         review = list(manifest.get("review", {}).values())
-        iwe: dict[str, Any]
-        try:
-            command = self._iwe()
-            result = subprocess.run(
-                [command, "--version"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=5,
-                check=False,
-            )
-            iwe = {
-                "command": command,
-                "available": result.returncode == 0,
-                "version": (result.stdout or result.stderr).strip(),
-                "integration": "external-cli",
-                "auto_update": False,
-            }
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            iwe = {
-                "command": self.settings.iwe_command,
-                "available": False,
-                "version": "",
-                "integration": "external-cli",
-                "auto_update": False,
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        source = self.settings.iwe_source
-        source_status: dict[str, Any] = {
-            "path": str(source),
-            "available": False,
-            "remote": "",
-            "branch": "",
-            "head": "",
-            "dirty": False,
-            "auto_update": False,
-            "update": f"git -C {source} pull --ff-only",
-            "install": f"cargo install --path {source / 'crates' / 'iwe'} --locked --force",
-        }
-        if source.is_dir():
-            try:
-                def git(*arguments: str) -> tuple[int, str]:
-                    result = subprocess.run(
-                        ["git", "-C", str(source), *arguments],
-                        text=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=5,
-                        check=False,
-                    )
-                    return result.returncode, (result.stdout or result.stderr).strip()
-
-                valid, _inside = git("rev-parse", "--is-inside-work-tree")
-                if valid == 0:
-                    source_status["available"] = True
-                    _code, source_status["remote"] = git(
-                        "remote", "get-url", "origin"
-                    )
-                    _code, source_status["branch"] = git(
-                        "rev-parse", "--abbrev-ref", "HEAD"
-                    )
-                    _code, source_status["head"] = git("rev-parse", "HEAD")
-                    _code, dirty = git("status", "--porcelain")
-                    source_status["dirty"] = bool(dirty)
-            except (OSError, subprocess.SubprocessError) as exc:
-                source_status["error"] = f"{type(exc).__name__}: {exc}"
-        iwe["source"] = source_status
         return {
             "root": str(self.root),
-            "initialized": (self.root / ".iwe" / "config.toml").is_file(),
+            "initialized": self.manifest_path.is_file(),
             "entries": len(entries),
             "review_required": len(review),
             "native_excluded": int(manifest.get("native_excluded") or 0),
@@ -792,6 +702,12 @@ class IweCatalog:
                 state: sum(row.get("state") == state for row in entries)
                 for state in ("native", "hidden", "cold", "archived")
             },
-            "iwe": iwe,
+            "graph_index": {
+                "available": True,
+                "integration": "in-process",
+                "ranking": "BM25 + fuzzy subsequence + reciprocal-rank fusion",
+                "relationships": ["source", "category", "tag", "state"],
+                "external_runtime": False,
+            },
             "generated_at": manifest.get("generated_at", ""),
         }

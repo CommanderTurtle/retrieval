@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from hermes_retrieval.catalog import IweCatalog
+from hermes_retrieval.catalog import RetrievalCatalog
 from hermes_retrieval.models import SourceConfig
 
 
@@ -12,286 +12,143 @@ def _settings(tmp_path: Path, root: Path) -> SimpleNamespace:
     return SimpleNamespace(
         root=tmp_path,
         catalog_root=root,
-        iwe_command="iwe",
         taxonomy_file=Path(__file__).parents[1] / "taxonomy.toml",
         category_overrides_file=tmp_path / "category-overrides.toml",
     )
 
 
-def test_iwe_catalog_builds_walkable_source_and_category_hubs(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    skill = tmp_path / "repo" / "skills" / "packet-hunter" / "SKILL.md"
-    skill.parent.mkdir(parents=True)
-    skill.write_text(
-        "---\n"
-        "name: Packet Hunter\n"
-        "description: Hunt suspicious network packets.\n"
-        "tags: [network, detection]\n"
-        "---\n"
-        "# Packet Hunter\n\n"
-        "Inspect traffic and DNS evidence.\n",
+def _skill(path: Path, name: str, description: str, body: str = "") -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    target = path / "SKILL.md"
+    target.write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n"
+        f"# {name}\n\n{body}\n",
         encoding="utf-8",
     )
+    return target
+
+
+def test_catalog_builds_walkable_source_and_category_graph(tmp_path: Path) -> None:
+    _skill(
+        tmp_path / "repo" / "skills" / "packet-hunter",
+        "Packet Hunter",
+        "Hunt suspicious network packets.",
+        "Inspect traffic and DNS evidence.",
+    )
     root = tmp_path / "catalog"
-    settings = _settings(tmp_path, root)
-    source = SourceConfig("security", "skills", tmp_path / "repo", state="cold")
-    catalog = IweCatalog(settings, [source])
-    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
-    monkeypatch.setattr(
-        "hermes_retrieval.catalog.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0, stdout="", stderr=""
-        ),
+    catalog = RetrievalCatalog(
+        _settings(tmp_path, root),
+        [SourceConfig("security", "skills", tmp_path / "repo", state="cold")],
     )
 
     report = catalog.sync()
+    tree = catalog.browse()
 
     assert report["entries"] == 1
-    manifest = json.loads(
-        (root / ".retrieval-catalog.json").read_text(encoding="utf-8")
-    )
-    entry = manifest["entries"]["security:skills/packet-hunter"]
-    assert entry["state"] == "cold"
+    entry = catalog.entry("security:skills/packet-hunter")
     assert "network-security" in entry["categories"]
-    card = root / entry["card"]
-    assert card.is_file()
-    source_hub = (root / "sources" / "security.md").read_text(encoding="utf-8")
-    assert f"](../{entry['card']})" in source_hub
+    assert len(entry["package_hash"]) == 64
+    assert (root / entry["card"]).is_file()
+    assert tree["schema_version"] == "retrieval.catalog-tree.v1"
+    assert any(root["id"] == "source:security" for root in tree["roots"])
 
 
-def test_iwe_find_filters_native_entries(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    root = tmp_path / "catalog"
-    root.mkdir()
-    payload = {
-        "version": 3,
-        "entries": {
-            "cold:a": {
-                "item_id": "cold:a",
-                "iwe_key": "skills/cold/a",
-                "state": "cold",
-            },
-            "native:b": {
-                "item_id": "native:b",
-                "iwe_key": "skills/native/b",
-                "state": "native",
-            },
-            "hidden:c": {
-                "item_id": "hidden:c",
-                "iwe_key": "skills/hidden/c",
-                "state": "hidden",
-            },
-        },
-        "owned_files": [],
-    }
-    (root / ".retrieval-catalog.json").write_text(
-        json.dumps(payload), encoding="utf-8"
+def test_find_uses_integrated_fuzzy_and_bm25_ranking(tmp_path: Path) -> None:
+    _skill(
+        tmp_path / "cold" / "packets",
+        "Packet Analysis",
+        "Inspect network packet captures and DNS traffic.",
     )
-    settings = _settings(tmp_path, root)
-    catalog = IweCatalog(settings, [])
-    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
-    monkeypatch.setattr(
-        "hermes_retrieval.catalog.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
-                [
-                    {"key": "skills/native/b"},
-                    {"key": "skills/hidden/c"},
-                    {"key": "skills/cold/a"},
-                ]
-            ),
-            stderr="",
-        ),
+    _skill(
+        tmp_path / "cold" / "slides",
+        "Slide Builder",
+        "Create presentation decks.",
     )
+    catalog = RetrievalCatalog(
+        _settings(tmp_path, tmp_path / "catalog"),
+        [SourceConfig("cold", "skills", tmp_path / "cold", state="cold")],
+    )
+    catalog.sync()
 
-    assert [row["item_id"] for row in catalog.find("a")] == ["hidden:c", "cold:a"]
+    result = catalog.find("network packet", limit=2)
+
+    assert result[0]["item_id"] == "cold:packets"
+    assert result[0]["graph_rank"] == 1
 
 
-def test_hidden_native_skill_is_graphed_without_exposing_active_neighbor(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    hidden = tmp_path / "native" / "packet-hidden" / "SKILL.md"
-    active = tmp_path / "native" / "packet-active" / "SKILL.md"
-    hidden.parent.mkdir(parents=True)
-    active.parent.mkdir(parents=True)
-    hidden.write_text(
-        "---\nname: Packet Hidden\ndescription: Audit network packets.\nhide: true\n---\n# Packet Hidden",
-        encoding="utf-8",
-    )
-    active.write_text(
-        "---\nname: Packet Active\ndescription: Audit network packets.\n---\n# Packet Active",
-        encoding="utf-8",
-    )
-    catalog = IweCatalog(
+def test_identical_packages_merge_provenance_by_content(tmp_path: Path) -> None:
+    body = "Inspect network packets and security evidence."
+    first = _skill(tmp_path / "first" / "packet", "Packet", body)
+    second = _skill(tmp_path / "second" / "packet-copy", "Packet", body)
+    (first.parent / "guide.md").write_text("same resource\n", encoding="utf-8")
+    (second.parent / "guide.md").write_text("same resource\n", encoding="utf-8")
+    catalog = RetrievalCatalog(
         _settings(tmp_path, tmp_path / "catalog"),
         [
-            SourceConfig(
-                "omp",
-                "skills",
-                tmp_path / "native",
-                state="native",
-                harness="omp",
-            )
+            SourceConfig("first", "skills", tmp_path / "first", state="cold"),
+            SourceConfig("second", "skills", tmp_path / "second", state="cold"),
         ],
     )
-    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
-    monkeypatch.setattr(
-        "hermes_retrieval.catalog.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+
+    report = catalog.sync()
+    entry = next(iter(catalog.entries().values()))
+
+    assert report["entries"] == 1
+    assert report["duplicates_excluded"] == 1
+    assert entry["duplicate_sources"] == ["first", "second"]
+    assert sorted(entry["duplicate_item_ids"]) == ["first:packet", "second:packet-copy"]
+
+
+def test_same_title_with_different_content_remains_addressable(tmp_path: Path) -> None:
+    _skill(tmp_path / "first" / "packet", "Packet", "Inspect DNS packets.")
+    _skill(tmp_path / "second" / "packet", "Packet", "Design presentation slides.")
+    catalog = RetrievalCatalog(
+        _settings(tmp_path, tmp_path / "catalog"),
+        [
+            SourceConfig("first", "skills", tmp_path / "first", state="cold"),
+            SourceConfig("second", "skills", tmp_path / "second", state="cold"),
+        ],
     )
 
     report = catalog.sync()
 
     assert report["entries"] == 2
-    assert report["hidden"] == 1
-    assert report["native_excluded"] == 0
-    assert catalog.entry("omp:packet-hidden")["state"] == "hidden"
-    assert catalog.entry("omp:packet-hidden")["native_harness"] == "omp"
-    assert catalog.entry("omp:packet-active")["native_harnesses"] == ["omp"]
+    assert report["duplicates_excluded"] == 0
 
 
-def test_native_name_suppresses_duplicate_cold_skill(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    native = tmp_path / "native" / "humanizer" / "SKILL.md"
-    cold = tmp_path / "cold" / "humanizer" / "SKILL.md"
-    native.parent.mkdir(parents=True)
-    cold.parent.mkdir(parents=True)
-    body = "---\nname: Humanizer\ndescription: Improve prose.\n---\n# Humanizer\n"
-    native.write_text(body, encoding="utf-8")
-    cold.write_text(body, encoding="utf-8")
-    root = tmp_path / "catalog"
-    settings = _settings(tmp_path, root)
-    catalog = IweCatalog(
-        settings,
-        [
-            SourceConfig("cold", "skills", tmp_path / "cold", state="cold"),
-            SourceConfig("native", "skills", tmp_path / "native", state="native"),
-        ],
+def test_hidden_native_skill_is_searchable_for_other_harness(tmp_path: Path) -> None:
+    skill = _skill(
+        tmp_path / "native" / "packet-hidden",
+        "Packet Hidden",
+        "Audit network packets.",
     )
-    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
-    monkeypatch.setattr(
-        "hermes_retrieval.catalog.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0, stdout="", stderr=""
-        ),
-    )
-
-    report = catalog.sync()
-
-    assert report["entries"] == 0
-    assert report["native_excluded"] == 1
-    assert catalog.entries() == {}
-
-
-def test_native_skill_remains_available_to_the_other_harness(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    skill = tmp_path / "hermes" / "native-only" / "SKILL.md"
-    skill.parent.mkdir(parents=True)
     skill.write_text(
-        "---\nname: Native Only\ndescription: Audit network security packets.\n---\n"
-        "# Native Only\n",
+        skill.read_text(encoding="utf-8").replace("---\n#", "hide: true\n---\n#"),
         encoding="utf-8",
     )
-    root = tmp_path / "catalog"
-    catalog = IweCatalog(
-        _settings(tmp_path, root),
+    catalog = RetrievalCatalog(
+        _settings(tmp_path, tmp_path / "catalog"),
         [
             SourceConfig(
-                "hermes",
-                "skills",
-                tmp_path / "hermes",
-                state="native",
-                harness="hermes",
+                "omp", "skills", tmp_path / "native", state="native", harness="omp"
             )
         ],
     )
-    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
-    monkeypatch.setattr(
-        "hermes_retrieval.catalog.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0, stdout="", stderr=""
-        ),
-    )
 
     report = catalog.sync()
-    entry = catalog.entry("hermes:native-only")
+    entry = catalog.entry("omp:packet-hidden")
 
-    assert report["entries"] == 1
-    assert report["native_excluded"] == 0
-    assert entry["state"] == "native"
-    assert entry["native_harnesses"] == ["hermes"]
+    assert report["hidden"] == 1
+    assert entry["state"] == "hidden"
+    assert entry["hidden_harnesses"] == ["omp"]
 
 
-def test_uncategorized_skill_requires_review_and_is_not_graphed(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    skill = tmp_path / "cold" / "peculiar" / "SKILL.md"
-    skill.parent.mkdir(parents=True)
-    skill.write_text(
-        "---\nname: Peculiar\ndescription: Zorb the quux.\n---\n# Peculiar\n",
-        encoding="utf-8",
-    )
+def test_manifest_version_rejects_stale_external_index(tmp_path: Path) -> None:
     root = tmp_path / "catalog"
-    catalog = IweCatalog(
-        _settings(tmp_path, root),
-        [SourceConfig("cold", "skills", tmp_path / "cold", state="cold")],
+    root.mkdir()
+    (root / ".retrieval-catalog.json").write_text(
+        json.dumps({"version": 4, "entries": {"stale": {}}}), encoding="utf-8"
     )
-    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
-    monkeypatch.setattr(
-        "hermes_retrieval.catalog.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0, stdout="", stderr=""
-        ),
-    )
+    catalog = RetrievalCatalog(_settings(tmp_path, root), [])
 
-    report = catalog.sync()
-
-    assert report["entries"] == 0
-    assert report["review_required"] == 1
-    assert catalog.audit()["review"][0]["skill_id"] == "cold:peculiar"
-    assert not (root / "skills" / "cold").exists()
-
-
-def test_local_override_promotes_reviewed_skill(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    skill = tmp_path / "cold" / "peculiar" / "SKILL.md"
-    skill.parent.mkdir(parents=True)
-    skill.write_text(
-        "---\nname: Peculiar\ndescription: Zorb the quux.\n---\n# Peculiar\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "category-overrides.toml").write_text(
-        '[skills]\n"cold:peculiar" = ["research"]\n',
-        encoding="utf-8",
-    )
-    root = tmp_path / "catalog"
-    catalog = IweCatalog(
-        _settings(tmp_path, root),
-        [SourceConfig("cold", "skills", tmp_path / "cold", state="cold")],
-    )
-    monkeypatch.setattr(catalog, "_iwe", lambda: "iwe")
-    monkeypatch.setattr(
-        "hermes_retrieval.catalog.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0, stdout="", stderr=""
-        ),
-    )
-
-    report = catalog.sync()
-
-    assert report["entries"] == 1
-    assert report["review_required"] == 0
-    assert catalog.entry("cold:peculiar")["categories"] == ["research"]
+    assert catalog.manifest()["entries"] == {}

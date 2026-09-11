@@ -10,10 +10,11 @@ import signal
 import sys
 import threading
 
-from .catalog import IweCatalog
+from .catalog import RetrievalCatalog
+from .baseline import BaselineManager
 from .config import Settings
 from .context_audit import audit_context
-from .projection import SkillProjection, integrate_harnesses
+from .projection import SkillProjection, integrate_harnesses, managed_profile_homes
 from .service import RetrievalService
 from .skill_admin import SkillAdmin, SkillAdminError
 from .source_admin import SourceRegistry
@@ -64,6 +65,10 @@ def _parser() -> argparse.ArgumentParser:
     catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
     catalog_commands.add_parser("sync")
     catalog_commands.add_parser("stats")
+    catalog_commands.add_parser(
+        "browse",
+        help="emit the structured source/category/skill graph as JSON",
+    )
     catalog_audit = catalog_commands.add_parser(
         "audit",
         help="review category assignments without changing sources or MCP tools",
@@ -100,6 +105,17 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "integrate",
         help="register isolated projection and MCP lanes with Hermes and OMP",
+    )
+    session_close = sub.add_parser(
+        "session-close",
+        help="index installed skills, merge duplicates, and restore a clean host baseline",
+    )
+    session_close.add_argument("--harness", choices=_HARNESSES, required=True)
+    session_close.add_argument("--home", type=Path)
+    session_close.add_argument(
+        "--all-profiles",
+        action="store_true",
+        help="reconcile the default home and every existing profile",
     )
     find = sub.add_parser("find-skills")
     find.add_argument("query")
@@ -343,6 +359,32 @@ def _run_projected(args: argparse.Namespace) -> dict:
     }
 
 
+def _session_homes(settings: Settings, harness: str) -> list[Path]:
+    return managed_profile_homes(settings, harness)
+
+
+def _run_session_close(args: argparse.Namespace) -> dict:
+    settings = Settings.load()
+    if args.home and args.all_profiles:
+        raise ValueError("use either --home or --all-profiles, not both")
+    homes = (
+        _session_homes(settings, args.harness)
+        if args.all_profiles
+        else [args.home.expanduser().resolve() if args.home else None]
+    )
+    results = [
+        BaselineManager(settings, args.harness, harness_home=home).reconcile()
+        for home in homes
+    ]
+    return {
+        "harness": args.harness,
+        "homes": results,
+        "consolidated": sum(len(row["consolidated"]) for row in results),
+        "removed": sum(len(row["removed"]) for row in results),
+        "restored_stock": sum(len(row["restored_stock"]) for row in results),
+    }
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -363,6 +405,14 @@ def main() -> None:
         return
     if args.command == "integrate":
         print(json.dumps(integrate_harnesses(Settings.load()), indent=2, sort_keys=True))
+        return
+    if args.command == "session-close":
+        try:
+            result = _run_session_close(args)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"retrieval: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        print(json.dumps(result, indent=2, sort_keys=True))
         return
     if args.command == "context":
         targets = [Path(value) for value in args.targets] or [Path.cwd()]
@@ -389,11 +439,13 @@ def main() -> None:
         return
     if args.command == "catalog":
         settings = Settings.load()
-        catalog = IweCatalog(settings, settings.sources())
+        catalog = RetrievalCatalog(settings, settings.sources())
         if args.catalog_command == "sync":
             result = catalog.sync()
         elif args.catalog_command == "stats":
             result = catalog.stats()
+        elif args.catalog_command == "browse":
+            result = catalog.browse()
         elif args.catalog_command == "audit":
             if args.path:
                 default_name = re.sub(

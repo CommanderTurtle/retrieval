@@ -100,8 +100,6 @@ class Settings:
     catalog_root: Path
     projection_root: Path
     target_harness: str
-    iwe_command: str
-    iwe_source: Path
     omp_command: str
     scout_enabled: bool
     scout_timeout: int
@@ -152,6 +150,24 @@ class Settings:
                 )
             )
         ).resolve()
+        legacy_catalog_root = Path(
+            os.path.expanduser("~/.local/share/retrieval/catalog")
+        ).resolve()
+        catalog_root = Path(
+            os.path.expandvars(
+                os.path.expanduser(
+                    os.getenv(
+                        "RETRIEVAL_CATALOG_ROOT",
+                        "~/.local/share/retrieval/catalog-v5",
+                    )
+                )
+            )
+        ).resolve()
+        # A pre-upgrade MCP process may remain alive inside an existing harness
+        # session. Keep its older manifest/cards in the legacy directory so a
+        # rolling update cannot rewrite the current catalog with an old schema.
+        if catalog_root == legacy_catalog_root:
+            catalog_root = legacy_catalog_root.with_name("catalog-v5")
         return cls(
             root=project_root,
             sources_file=project_root / "sources.toml",
@@ -225,16 +241,7 @@ class Settings:
                     )
                 )
             ).absolute(),
-            catalog_root=Path(
-                os.path.expandvars(
-                    os.path.expanduser(
-                        os.getenv(
-                            "RETRIEVAL_CATALOG_ROOT",
-                            "~/.local/share/retrieval/catalog",
-                        )
-                    )
-                )
-            ).resolve(),
+            catalog_root=catalog_root,
             projection_root=Path(
                 os.path.expandvars(
                     os.path.expanduser(
@@ -248,16 +255,6 @@ class Settings:
             target_harness=os.getenv("RETRIEVAL_HARNESS", "hermes")
             .strip()
             .casefold(),
-            iwe_command=os.path.expandvars(
-                os.path.expanduser(os.getenv("RETRIEVAL_IWE_COMMAND", "~/.cargo/bin/iwe"))
-            ),
-            iwe_source=Path(
-                os.path.expandvars(
-                    os.path.expanduser(
-                        os.getenv("RETRIEVAL_IWE_SOURCE", "~/Hermes/iwe")
-                    )
-                )
-            ).resolve(),
             omp_command=os.path.expandvars(
                 os.path.expanduser(os.getenv("RETRIEVAL_OMP_COMMAND", "~/.bun/bin/omp"))
             ),

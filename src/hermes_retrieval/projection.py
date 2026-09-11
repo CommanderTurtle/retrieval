@@ -494,16 +494,449 @@ def _prepare_scout_profile(
     }
 
 
-def _without_legacy_roots(values: list[Any], *, keep: str) -> list[Any]:
-    legacy = {
-        str(
-            Path("~/.local/share/hermes-retrieval/projections/skills")
-            .expanduser()
-            .resolve()
-        ),
-        str((Path("~/.local/share/retrieval/projections/skills").expanduser().resolve())),
+def _run_harness_command(
+    command: str,
+    arguments: list[str],
+    *,
+    environment: dict[str, str] | None = None,
+) -> None:
+    executable = shlex.split(command)
+    if not executable:
+        raise RuntimeError("harness command is empty")
+    env = os.environ.copy()
+    env.update(environment or {})
+    result = subprocess.run(
+        [*executable, *arguments],
+        cwd=str(Path.home()),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()[-2000:]
+        raise RuntimeError(
+            f"{' '.join([*executable, *arguments])} failed ({result.returncode}): {detail}"
+        )
+
+
+def _all_hermes_profile_homes(settings: Settings) -> list[Path]:
+    homes = [settings.hermes_config.parent]
+    profiles = settings.hermes_config.parent / "profiles"
+    if profiles.is_dir():
+        homes.extend(
+            entry
+            for entry in sorted(profiles.iterdir())
+            if entry.is_dir() and (entry / "config.yaml").is_file()
+        )
+    return homes
+
+
+def _is_private_librarian_home(home: Path) -> bool:
+    config_path = home / "config.yaml"
+    if not config_path.is_file():
+        return False
+    servers = _load_yaml(config_path).get("mcp_servers")
+    return isinstance(servers, dict) and "librarian-okf" in servers
+
+
+def _hermes_profile_homes(settings: Settings) -> list[Path]:
+    default = settings.hermes_config.parent.resolve(strict=False)
+    return [
+        home
+        for home in _all_hermes_profile_homes(settings)
+        if home.resolve(strict=False) == default or not _is_private_librarian_home(home)
+    ]
+
+
+def _all_omp_profile_homes(settings: Settings) -> list[Path]:
+    homes = [settings.omp_config.parent]
+    profiles = settings.omp_config.parent.parent / "profiles"
+    if profiles.is_dir():
+        homes.extend(
+            entry / "agent"
+            for entry in sorted(profiles.iterdir())
+            if entry.is_dir()
+            and entry.name != settings.scout_profile
+            and (entry / "agent" / "config.yml").is_file()
+        )
+    return homes
+
+
+def _omp_profile_homes(settings: Settings) -> list[Path]:
+    """Return OMP homes using the ordinary external-tool stack.
+
+    The Retrieval scout, empty auditor profiles, and Librarian's private OKF
+    worker stay isolated. A normal profile is recognized from its existing
+    Retrieval or Camofox MCP registration rather than from its display name.
+    """
+
+    homes = [settings.omp_config.parent]
+    for home in _all_omp_profile_homes(settings)[1:]:
+        mcp_path = home / "mcp.json"
+        if not mcp_path.is_file():
+            continue
+        servers = _load_json(mcp_path).get("mcpServers")
+        if isinstance(servers, dict) and (
+            "retrieval" in servers or "camofox" in servers
+        ):
+            homes.append(home)
+    return homes
+
+
+def managed_profile_homes(settings: Settings, harness: str) -> list[Path]:
+    """Return only homes that participate in Retrieval's ordinary tool stack."""
+
+    if harness == "hermes":
+        return _hermes_profile_homes(settings)
+    if harness == "omp":
+        return _omp_profile_homes(settings)
+    raise ValueError(f"unsupported retrieval harness: {harness}")
+
+
+def _remove_unchanged_routing_skill(
+    target: Path,
+    skill_text: str,
+    metadata_text: str,
+) -> bool:
+    skill_target = target / "SKILL.md"
+    metadata_target = target / "agents" / "openai.yaml"
+    if not skill_target.is_file() or skill_target.read_text(encoding="utf-8") != skill_text:
+        return False
+    if metadata_target.is_file() and metadata_target.read_text(encoding="utf-8") != metadata_text:
+        return False
+    skill_target.unlink()
+    if metadata_target.is_file():
+        metadata_target.unlink()
+    for directory in (metadata_target.parent, target):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return True
+
+
+def _install_routing_skills(
+    settings: Settings,
+    *,
+    hermes_homes: list[Path],
+    omp_homes: list[Path],
+) -> tuple[dict[str, list[str]], bool]:
+    source = settings.root / "skills" / "retrieve-knowledge"
+    skill = source / "SKILL.md"
+    metadata = source / "agents" / "openai.yaml"
+    if not skill.is_file() or not metadata.is_file():
+        raise RuntimeError(f"Retrieval routing skill is incomplete: {source}")
+
+    targets = [
+        home / "skills" / "retrieve-knowledge"
+        for home in omp_homes
+    ]
+    all_omp_targets = [settings.omp_config.parent / "skills" / "retrieve-knowledge"]
+    omp_profiles = settings.omp_config.parent.parent / "profiles"
+    if omp_profiles.is_dir():
+        all_omp_targets.extend(
+            entry / "agent" / "skills" / "retrieve-knowledge"
+            for entry in sorted(omp_profiles.iterdir())
+            if entry.is_dir()
+        )
+    targets.extend(
+        home / "skills" / "research" / "retrieve-knowledge"
+        for home in hermes_homes
+    )
+    all_hermes_targets = [
+        home / "skills" / "research" / "retrieve-knowledge"
+        for home in _all_hermes_profile_homes(settings)
+    ]
+
+    changed = False
+    installed: list[str] = []
+    skill_text = skill.read_text(encoding="utf-8")
+    metadata_text = metadata.read_text(encoding="utf-8")
+    desired = {target.resolve(strict=False) for target in targets}
+    removed: list[str] = []
+    for target in [*all_omp_targets, *all_hermes_targets]:
+        if target.resolve(strict=False) in desired:
+            continue
+        if _remove_unchanged_routing_skill(target, skill_text, metadata_text):
+            changed = True
+            removed.append(str(target))
+    for target in targets:
+        skill_target = target / "SKILL.md"
+        metadata_target = target / "agents" / "openai.yaml"
+        before_skill = skill_target.read_text(encoding="utf-8") if skill_target.is_file() else None
+        before_metadata = metadata_target.read_text(encoding="utf-8") if metadata_target.is_file() else None
+        _atomic_text(skill_target, skill_text)
+        _atomic_text(metadata_target, metadata_text)
+        changed = changed or before_skill != skill_text or before_metadata != metadata_text
+        installed.append(str(target))
+    return {"installed": installed, "removed_from_isolated_profiles": removed}, changed
+
+
+def _install_lifecycle_integrations(
+    settings: Settings,
+    *,
+    hermes_homes: list[Path],
+    omp_homes: list[Path],
+) -> tuple[dict[str, Any], bool]:
+    hook_script = settings.root / "hooks" / "session-close.sh"
+    omp_source = settings.root / "integrations" / "omp" / "retrieval-session-close.ts"
+    if not hook_script.is_file() or not omp_source.is_file():
+        raise RuntimeError("Retrieval session-close integrations are incomplete")
+
+    changed = False
+    hermes_installed: list[str] = []
+    hermes_removed: list[str] = []
+    command = f"{hook_script} hermes"
+    desired_hermes = {home.resolve(strict=False) for home in hermes_homes}
+    for home in _all_hermes_profile_homes(settings):
+        config_path = home / "config.yaml"
+        if not config_path.is_file():
+            continue
+        payload = _load_yaml(config_path)
+        hooks = payload.get("hooks")
+        hooks = dict(hooks) if isinstance(hooks, dict) else {}
+        current = hooks.get("on_session_end")
+        rows = list(current) if isinstance(current, list) else []
+        desired = {
+            "id": "retrieval-session-close",
+            "type": "command",
+            "command": command,
+            "timeout": 10,
+        }
+        filtered = [
+            row
+            for row in rows
+            if not (isinstance(row, dict) and row.get("id") == desired["id"])
+        ]
+        managed = home.resolve(strict=False) in desired_hermes
+        if managed:
+            filtered.append(desired)
+        if filtered != rows:
+            _run_harness_command(
+                settings.hermes_command,
+                ["config", "set", "--force", "hooks.on_session_end", json.dumps(filtered)],
+                environment={"HERMES_HOME": str(home)},
+            )
+            changed = True
+        if managed:
+            hermes_installed.append(str(config_path))
+        elif len(filtered) != len(rows):
+            hermes_removed.append(str(config_path))
+
+    omp_installed: list[str] = []
+    omp_removed: list[str] = []
+    extension_text = omp_source.read_text(encoding="utf-8")
+    desired_omp = {home.resolve(strict=False) for home in omp_homes}
+    for home in _all_omp_profile_homes(settings):
+        target = home / "extensions" / "retrieval-session-close.ts"
+        if home.resolve(strict=False) not in desired_omp:
+            if target.is_file() and target.read_text(encoding="utf-8") == extension_text:
+                target.unlink()
+                changed = True
+                omp_removed.append(str(target))
+            continue
+        before = target.read_text(encoding="utf-8") if target.is_file() else None
+        _atomic_text(target, extension_text)
+        changed = changed or before != extension_text
+        omp_installed.append(str(target))
+
+    return {
+        "hermes_hooks": hermes_installed,
+        "hermes_hooks_removed_from_isolated_profiles": hermes_removed,
+        "omp_extensions": omp_installed,
+        "omp_extensions_removed_from_isolated_profiles": omp_removed,
+        "worker": str(hook_script),
+    }, changed
+
+
+def _configure_hermes_home(
+    settings: Settings,
+    home: Path,
+    projection_root: str,
+) -> dict[str, Any]:
+    config_path = home / "config.yaml"
+    if not config_path.is_file():
+        return {"config": str(config_path), "available": False, "changed": False}
+    config = _load_yaml(config_path)
+    skills = config.setdefault("skills", {})
+    if not isinstance(skills, dict):
+        raise RuntimeError(f"Hermes skills configuration must be a mapping: {config_path}")
+    external = skills.setdefault("external_dirs", [])
+    if not isinstance(external, list):
+        raise RuntimeError(f"Hermes skills.external_dirs must be a list: {config_path}")
+    previous_external = list(external)
+    external[:] = [projection_root]
+
+    servers = config.setdefault("mcp_servers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"Hermes mcp_servers must be a mapping: {config_path}")
+    server = servers.setdefault("retrieval", {})
+    if not isinstance(server, dict):
+        raise RuntimeError(f"Hermes retrieval MCP configuration must be a mapping: {config_path}")
+    previous_server = json.loads(json.dumps(server))
+    server["command"] = str(settings.root / ".venv" / "bin" / "python")
+    server["args"] = ["-m", "hermes_retrieval.server"]
+    server["connect_timeout"] = 120.0
+    server["enabled"] = True
+    environment = server.setdefault("env", {})
+    if not isinstance(environment, dict):
+        raise RuntimeError(f"Hermes retrieval MCP env must be a mapping: {config_path}")
+    environment["RETRIEVAL_HARNESS"] = "hermes"
+    changed = previous_external != external or previous_server != server
+    if changed:
+        scoped_environment = {"HERMES_HOME": str(home)}
+        _run_harness_command(
+            settings.hermes_command,
+            ["config", "set", "--force", "skills.external_dirs", json.dumps(external)],
+            environment=scoped_environment,
+        )
+        _run_harness_command(
+            settings.hermes_command,
+            ["config", "set", "--force", "mcp_servers.retrieval", json.dumps(server)],
+            environment=scoped_environment,
+        )
+    return {"config": str(config_path), "available": True, "changed": changed}
+
+
+def _remove_retrieval_from_hermes_home(
+    settings: Settings,
+    home: Path,
+    projection_root: str,
+) -> dict[str, Any]:
+    """Remove only Retrieval-owned settings from an isolated Hermes home."""
+
+    config_path = home / "config.yaml"
+    if not config_path.is_file():
+        return {"config": str(config_path), "available": False, "changed": False}
+    config = _load_yaml(config_path)
+    scoped_environment = {"HERMES_HOME": str(home)}
+    changed = False
+
+    servers = config.get("mcp_servers")
+    if isinstance(servers, dict) and "retrieval" in servers:
+        _run_harness_command(
+            settings.hermes_command,
+            ["config", "unset", "mcp_servers.retrieval"],
+            environment=scoped_environment,
+        )
+        changed = True
+
+    skills = config.get("skills")
+    external = skills.get("external_dirs") if isinstance(skills, dict) else None
+    if isinstance(external, list):
+        desired = [value for value in external if str(value) != projection_root]
+        if desired != external:
+            arguments = (
+                ["config", "set", "--force", "skills.external_dirs", json.dumps(desired)]
+                if desired
+                else ["config", "unset", "skills.external_dirs"]
+            )
+            _run_harness_command(
+                settings.hermes_command,
+                arguments,
+                environment=scoped_environment,
+            )
+            changed = True
+    return {"config": str(config_path), "available": True, "changed": changed}
+
+
+def _configure_omp_home(
+    settings: Settings,
+    home: Path,
+    projection_root: str,
+) -> dict[str, Any]:
+    config_path = home / "config.yml"
+    mcp_path = home / "mcp.json"
+    if not config_path.is_file():
+        return {
+            "config": str(config_path),
+            "mcp_config": str(mcp_path),
+            "available": False,
+            "changed": False,
+        }
+    config = _load_yaml(config_path)
+    skills = config.setdefault("skills", {})
+    if not isinstance(skills, dict):
+        raise RuntimeError(f"OMP skills configuration must be a mapping: {config_path}")
+    custom = skills.setdefault("customDirectories", [])
+    if not isinstance(custom, list):
+        raise RuntimeError(f"OMP skills.customDirectories must be a list: {config_path}")
+    previous_custom = list(custom)
+    custom[:] = [projection_root]
+    config_changed = previous_custom != custom
+    if config_changed:
+        _run_harness_command(
+            settings.omp_command,
+            ["config", "set", "skills.customDirectories", json.dumps(custom)],
+            environment={"PI_CODING_AGENT_DIR": str(home)},
+        )
+
+    mcp = _load_json(mcp_path)
+    mcp.setdefault(
+        "$schema",
+        "https://raw.githubusercontent.com/can1357/oh-my-pi/main/"
+        "packages/coding-agent/src/config/mcp-schema.json",
+    )
+    servers = mcp.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"OMP mcpServers must be an object: {mcp_path}")
+    server = servers.setdefault("retrieval", {})
+    if not isinstance(server, dict):
+        raise RuntimeError(f"OMP retrieval MCP configuration must be an object: {mcp_path}")
+    server["type"] = "stdio"
+    server["command"] = str(settings.root / "start.sh")
+    server["cwd"] = str(settings.root)
+    environment = server.setdefault("env", {})
+    if not isinstance(environment, dict):
+        raise RuntimeError(f"OMP retrieval MCP env must be an object: {mcp_path}")
+    environment["RETRIEVAL_HARNESS"] = "omp"
+    mcp_changed = _write_json_if_changed(mcp_path, mcp)
+    return {
+        "config": str(config_path),
+        "mcp_config": str(mcp_path),
+        "available": True,
+        "changed": config_changed or mcp_changed,
     }
-    return [value for value in values if str(value) == keep or str(value) not in legacy]
+
+
+def _remove_retrieval_from_omp_home(
+    settings: Settings,
+    home: Path,
+    projection_root: str,
+) -> dict[str, Any]:
+    """Remove only Retrieval-owned settings from an isolated OMP home."""
+
+    config_path = home / "config.yml"
+    mcp_path = home / "mcp.json"
+    changed = False
+    if config_path.is_file():
+        config = _load_yaml(config_path)
+        skills = config.get("skills")
+        custom = skills.get("customDirectories") if isinstance(skills, dict) else None
+        if isinstance(custom, list):
+            desired = [value for value in custom if str(value) != projection_root]
+            if desired != custom:
+                _run_harness_command(
+                    settings.omp_command,
+                    ["config", "set", "skills.customDirectories", json.dumps(desired)],
+                    environment={"PI_CODING_AGENT_DIR": str(home)},
+                )
+                changed = True
+    if mcp_path.is_file():
+        mcp = _load_json(mcp_path)
+        servers = mcp.get("mcpServers")
+        if isinstance(servers, dict) and "retrieval" in servers:
+            del servers["retrieval"]
+            changed = _write_json_if_changed(mcp_path, mcp) or changed
+    return {
+        "config": str(config_path),
+        "mcp_config": str(mcp_path),
+        "available": config_path.is_file(),
+        "changed": changed,
+    }
 
 
 def integrate_harnesses(settings: Settings) -> dict[str, Any]:
@@ -516,80 +949,52 @@ def integrate_harnesses(settings: Settings) -> dict[str, Any]:
     hermes_projection.root.mkdir(parents=True, exist_ok=True)
     omp_projection.root.mkdir(parents=True, exist_ok=True)
 
-    hermes_changed = False
-    if settings.hermes_config.is_file():
-        hermes = _load_yaml(settings.hermes_config)
-        hermes_skills = hermes.setdefault("skills", {})
-        if not isinstance(hermes_skills, dict):
-            raise RuntimeError("Hermes skills configuration must be a mapping")
-        external = hermes_skills.setdefault("external_dirs", [])
-        if not isinstance(external, list):
-            raise RuntimeError("Hermes skills.external_dirs must be a list")
-        external[:] = [
-            value
-            for value in _without_legacy_roots(external, keep=hermes_root)
-            if str(value) != omp_root
-        ]
-        if hermes_root not in external:
-            external.append(hermes_root)
-        mcp_servers = hermes.setdefault("mcp_servers", {})
-        if not isinstance(mcp_servers, dict):
-            raise RuntimeError("Hermes mcp_servers must be a mapping")
-        server = mcp_servers.setdefault("retrieval", {})
-        if not isinstance(server, dict):
-            raise RuntimeError("Hermes retrieval MCP configuration must be a mapping")
-        server.setdefault("command", str(settings.root / ".venv" / "bin" / "python"))
-        server.setdefault("args", ["-m", "hermes_retrieval.server"])
-        server.setdefault("connect_timeout", 120.0)
-        server["enabled"] = True
-        environment = server.setdefault("env", {})
-        if not isinstance(environment, dict):
-            raise RuntimeError("Hermes retrieval MCP env must be a mapping")
-        environment["RETRIEVAL_HARNESS"] = "hermes"
-        hermes_changed = _write_yaml_if_changed(settings.hermes_config, hermes)
+    hermes_homes = _hermes_profile_homes(settings)
+    hermes_profiles = [
+        _configure_hermes_home(settings, home, hermes_root)
+        for home in hermes_homes
+    ]
+    managed_hermes = {home.resolve(strict=False) for home in hermes_homes}
+    isolated_hermes_profiles = [
+        _remove_retrieval_from_hermes_home(settings, home, hermes_root)
+        for home in _all_hermes_profile_homes(settings)
+        if home.resolve(strict=False) not in managed_hermes
+    ]
+    hermes_changed = any(
+        row["changed"] for row in [*hermes_profiles, *isolated_hermes_profiles]
+    )
 
-    omp_changed = False
+    omp_homes = _omp_profile_homes(settings)
+    omp_profiles = [
+        _configure_omp_home(settings, home, omp_root)
+        for home in omp_homes
+    ]
+    managed_omp = {home.resolve(strict=False) for home in omp_homes}
+    isolated_omp_profiles = [
+        _remove_retrieval_from_omp_home(settings, home, omp_root)
+        for home in _all_omp_profile_homes(settings)
+        if home.resolve(strict=False) not in managed_omp
+    ]
+    omp_changed = any(
+        row["changed"] for row in [*omp_profiles, *isolated_omp_profiles]
+    )
     scout_profile: dict[str, Any] | None = None
     if settings.omp_config.is_file():
-        omp = _load_yaml(settings.omp_config)
-        omp_skills = omp.setdefault("skills", {})
-        if not isinstance(omp_skills, dict):
-            raise RuntimeError("OMP skills configuration must be a mapping")
-        custom = omp_skills.setdefault("customDirectories", [])
-        if not isinstance(custom, list):
-            raise RuntimeError("OMP skills.customDirectories must be a list")
-        custom[:] = [
-            value
-            for value in _without_legacy_roots(custom, keep=omp_root)
-            if str(value) != hermes_root
-        ]
-        if omp_root not in custom:
-            custom.append(omp_root)
-        omp_changed = _write_yaml_if_changed(settings.omp_config, omp)
-        scout_profile = _prepare_scout_profile(settings, omp)
-
-    omp_mcp_changed = False
-    if settings.omp_config.is_file():
-        omp_mcp = _load_json(settings.omp_mcp_config)
-        omp_mcp.setdefault(
-            "$schema",
-            "https://raw.githubusercontent.com/can1357/oh-my-pi/main/"
-            "packages/coding-agent/src/config/mcp-schema.json",
+        scout_profile = _prepare_scout_profile(
+            settings,
+            _load_yaml(settings.omp_config),
         )
-        servers = omp_mcp.setdefault("mcpServers", {})
-        if not isinstance(servers, dict):
-            raise RuntimeError("OMP mcpServers must be an object")
-        server = servers.setdefault("retrieval", {})
-        if not isinstance(server, dict):
-            raise RuntimeError("OMP retrieval MCP configuration must be an object")
-        server.setdefault("type", "stdio")
-        server.setdefault("command", str(settings.root / "start.sh"))
-        server.setdefault("cwd", str(settings.root))
-        environment = server.setdefault("env", {})
-        if not isinstance(environment, dict):
-            raise RuntimeError("OMP retrieval MCP env must be an object")
-        environment["RETRIEVAL_HARNESS"] = "omp"
-        omp_mcp_changed = _write_json_if_changed(settings.omp_mcp_config, omp_mcp)
+
+    installed_skills, skills_changed = _install_routing_skills(
+        settings,
+        hermes_homes=hermes_homes,
+        omp_homes=omp_homes,
+    )
+    lifecycle, lifecycle_changed = _install_lifecycle_integrations(
+        settings,
+        hermes_homes=hermes_homes,
+        omp_homes=omp_homes,
+    )
 
     return {
         "projection_root": str(settings.projection_root),
@@ -599,15 +1004,26 @@ def integrate_harnesses(settings: Settings) -> dict[str, Any]:
             "changed": hermes_changed,
             "projection": hermes_root,
             "reload": "/reload-skills",
+            "profiles": hermes_profiles,
+            "isolated_profiles_cleaned": isolated_hermes_profiles,
         },
         "omp": {
             "config": str(settings.omp_config),
             "mcp_config": str(settings.omp_mcp_config),
             "available": settings.omp_config.is_file(),
-            "changed": omp_changed or omp_mcp_changed,
+            "changed": omp_changed,
             "projection": omp_root,
             "reload": "/reload",
             "scout_profile": scout_profile,
+            "profiles": omp_profiles,
+            "isolated_profiles_cleaned": isolated_omp_profiles,
         },
-        "restart_required": hermes_changed or omp_changed or omp_mcp_changed,
+        "routing_skills": installed_skills,
+        "session_close": lifecycle,
+        "restart_required": (
+            hermes_changed
+            or omp_changed
+            or skills_changed
+            or lifecycle_changed
+        ),
     }

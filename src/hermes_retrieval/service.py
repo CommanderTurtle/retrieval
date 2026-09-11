@@ -7,7 +7,7 @@ from typing import Any
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from .archive import ArchiveStore
-from .catalog import IweCatalog
+from .catalog import RetrievalCatalog
 from .config import Settings
 from .index import RetrievalIndex
 from .models import SourceConfig
@@ -62,7 +62,7 @@ class RetrievalService:
         self.sources = self.settings.sources()
         self.archive = ArchiveStore(self.settings.archive_db)
         self.index = RetrievalIndex(self.settings)
-        self.catalog = IweCatalog(self.settings, self.sources)
+        self.catalog = RetrievalCatalog(self.settings, self.sources)
         self.projections = SkillProjection(
             self.settings,
             self.settings.target_harness,
@@ -355,7 +355,7 @@ class RetrievalService:
         }
 
     def search_skills(self, query: str, limit: int = 8) -> dict[str, Any]:
-        """Fuse semantic Chroma ranking with IWE fuzzy/BM25 graph search."""
+        """Fuse semantic Chroma ranking with integrated fuzzy/BM25 search."""
 
         query = query.strip()
         if not query:
@@ -371,7 +371,7 @@ class RetrievalService:
             ],
             limit=max(limit * 8, 40),
         )
-        iwe = self.catalog.find(
+        graph_matches = self.catalog.find(
             query,
             limit=max(limit * 4, 20),
             states={"native", "hidden", "cold", "archived"},
@@ -404,7 +404,7 @@ class RetrievalService:
                     "rank_score": 0.0,
                     "semantic_rank": None,
                     "semantic_score": None,
-                    "iwe_rank": None,
+                    "graph_rank": None,
                 },
             )
 
@@ -423,14 +423,14 @@ class RetrievalService:
             row["semantic_score"] = round(hit.score, 6)
             row["rank_score"] += 1.0 / (60 + semantic_rank)
 
-        for match in iwe:
+        for match in graph_matches:
             item_id = str(match["item_id"])
             row = row_for(item_id)
             if row is None:
                 continue
-            iwe_rank = int(match["iwe_rank"])
-            row["iwe_rank"] = iwe_rank
-            row["rank_score"] += 1.0 / (60 + iwe_rank)
+            graph_rank = int(match["graph_rank"])
+            row["graph_rank"] = graph_rank
+            row["rank_score"] += 1.0 / (60 + graph_rank)
 
         normalized_query = query.casefold()
         query_terms = set(normalized_query.split())
@@ -447,15 +447,12 @@ class RetrievalService:
         )
         deduped = []
         seen_paths: set[str] = set()
-        seen_names: set[str] = set()
         peak = float(rows[0]["rank_score"]) if rows else 1.0
         for row in rows:
             canonical = str(Path(row["path"]).resolve(strict=False))
-            name = str(row["name"]).strip().casefold()
-            if canonical in seen_paths or name in seen_names:
+            if canonical in seen_paths:
                 continue
             seen_paths.add(canonical)
-            seen_names.add(name)
             row["score"] = round(float(row.pop("rank_score")) / peak, 6)
             deduped.append(row)
             if len(deduped) >= limit:
@@ -463,7 +460,7 @@ class RetrievalService:
         return {
             "query": query,
             "matches": deduped,
-            "ranking": "Chroma semantic + IWE fuzzy/BM25 reciprocal-rank fusion",
+            "ranking": "Chroma semantic + integrated fuzzy/BM25 reciprocal-rank fusion",
         }
 
     def _scout_read(self, skill_id: str) -> dict[str, Any]:
@@ -487,7 +484,7 @@ class RetrievalService:
             "state": effective_state,
             "categories": entry.get("categories", []),
             "canonical_excerpt": content[:12000],
-            "iwe_graph": context["graph"],
+            "catalog_graph": context["graph"],
         }
 
     def retrieve_skill(self, query: str) -> dict[str, Any]:

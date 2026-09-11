@@ -351,7 +351,7 @@ class RetrievalScout:
                 "name": "catalog_read",
                 "label": "Read skill graph context",
                 "description": (
-                    "Read one search result and its bounded IWE graph neighborhood. "
+                    "Read one search result and its bounded catalog graph neighborhood. "
                     "Read-only; accepts only a prior search result."
                 ),
                 "parameters": {

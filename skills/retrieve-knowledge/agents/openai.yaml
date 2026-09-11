@@ -1,4 +1,4 @@
 interface:
   display_name: "Retrieve Knowledge"
-  short_description: "Retrieve one dormant specialist skill"
-  default_prompt: "Use $retrieve-knowledge to fetch one relevant dormant skill without loading the whole catalog."
+  short_description: "Load a dormant skill in this turn"
+  default_prompt: "Use $retrieve-knowledge to retrieve and apply one relevant dormant skill now."

@@ -46,23 +46,35 @@ enabled = true
 state = "native"
 harness = "omp"
 
-# Explicit OMP custom directories are native sources too. Projection lanes are
-# deliberately excluded to prevent a selected copy feeding back into catalog.
+# Repository-owned skill packages are indexed cold. Only the single routing
+# skill and the temporary projection lane are visible to either harness.
 [[sources]]
-name = "omp-retrieval-skills"
+name = "retrieval-project-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/retrieval/skills"
 enabled = true
-state = "native"
-harness = "omp"
+state = "cold"
 
 [[sources]]
-name = "omp-persephone-skills"
+name = "persephone-project-skills"
 kind = "skills"
 path = "${HERMES_PROJECTS_DIR}/persephone/skills"
 enabled = true
-state = "native"
-harness = "omp"
+state = "cold"
+
+[[sources]]
+name = "librarian-project-skills"
+kind = "skills"
+path = "${HERMES_PROJECTS_DIR}/librarian/skills"
+enabled = true
+state = "cold"
+
+[[sources]]
+name = "localflame-project-skill"
+kind = "skills"
+path = "~/Deepseek/localflame"
+enabled = true
+state = "cold"
 
 # Persistent human-owned intake. Clone any future specialist skill repository
 # below this directory; the watcher sees nested SKILL.md changes automatically.
