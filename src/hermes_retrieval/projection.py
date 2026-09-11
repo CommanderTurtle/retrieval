@@ -596,25 +596,31 @@ def managed_profile_homes(settings: Settings, harness: str) -> list[Path]:
     raise ValueError(f"unsupported retrieval harness: {harness}")
 
 
-def _remove_unchanged_routing_skill(
-    target: Path,
-    skill_text: str,
-    metadata_text: str,
-) -> bool:
+def _remove_managed_routing_skill(target: Path) -> bool:
+    """Remove Retrieval's exact router path from an excluded profile.
+
+    Older Retrieval releases installed earlier revisions of this file, so an
+    equality check against the current source leaves stale routers behind.
+    The destination path is fixed and the frontmatter name proves ownership;
+    unrelated skills are therefore left alone.
+    """
+
     skill_target = target / "SKILL.md"
-    metadata_target = target / "agents" / "openai.yaml"
-    if not skill_target.is_file() or skill_target.read_text(encoding="utf-8") != skill_text:
+    if not skill_target.is_file():
         return False
-    if metadata_target.is_file() and metadata_target.read_text(encoding="utf-8") != metadata_text:
+
+    text = skill_target.read_text(encoding="utf-8")
+    frontmatter = re.match(r"\A---\s*\n(.*?)\n---(?:\s*\n|\s*\Z)", text, re.DOTALL)
+    if frontmatter is None:
         return False
-    skill_target.unlink()
-    if metadata_target.is_file():
-        metadata_target.unlink()
-    for directory in (metadata_target.parent, target):
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
+    try:
+        metadata = yaml.safe_load(frontmatter.group(1)) or {}
+    except yaml.YAMLError:
+        return False
+    if not isinstance(metadata, dict) or metadata.get("name") != "retrieve-knowledge":
+        return False
+
+    shutil.rmtree(target)
     return True
 
 
@@ -660,7 +666,7 @@ def _install_routing_skills(
     for target in [*all_omp_targets, *all_hermes_targets]:
         if target.resolve(strict=False) in desired:
             continue
-        if _remove_unchanged_routing_skill(target, skill_text, metadata_text):
+        if _remove_managed_routing_skill(target):
             changed = True
             removed.append(str(target))
     for target in targets:
