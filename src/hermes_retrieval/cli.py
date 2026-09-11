@@ -14,6 +14,7 @@ from .catalog import RetrievalCatalog
 from .baseline import BaselineManager
 from .config import Settings
 from .context_audit import audit_context
+from .doctor import audit_harnesses
 from .projection import SkillProjection, integrate_harnesses, managed_profile_homes
 from .service import RetrievalService
 from .skill_admin import SkillAdmin, SkillAdminError
@@ -106,6 +107,11 @@ def _parser() -> argparse.ArgumentParser:
         "integrate",
         help="register isolated projection and MCP lanes with Hermes and OMP",
     )
+    doctor = sub.add_parser(
+        "doctor",
+        help="audit installed MCP, routing-skill, and lifecycle wiring read-only",
+    )
+    doctor.add_argument("--json", action="store_true", dest="as_json")
     session_close = sub.add_parser(
         "session-close",
         help="index installed skills, merge duplicates, and restore a clean host baseline",
@@ -405,6 +411,24 @@ def main() -> None:
         return
     if args.command == "integrate":
         print(json.dumps(integrate_harnesses(Settings.load()), indent=2, sort_keys=True))
+        return
+    if args.command == "doctor":
+        result = audit_harnesses(Settings.load())
+        if args.as_json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            for row in result["checks"]:
+                mark = "ok  " if row["passed"] else "FAIL"
+                print(
+                    f"{mark}  {row['scope']:<22} {row['name']:<30} "
+                    f"{row['detail']}"
+                )
+            summary = result["summary"]
+            print(
+                f"Retrieval: {summary['passed']}/{summary['checks']} checks passed."
+            )
+        if not result["ok"]:
+            raise SystemExit(1)
         return
     if args.command == "session-close":
         try:

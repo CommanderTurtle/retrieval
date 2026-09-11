@@ -38,11 +38,8 @@ venv_python="$root/.venv/bin/python"
 "$uv_bin" sync --frozen --python "$venv_python"
 chmod +x -- "$root/hooks/session-close.sh"
 chmod +x -- "$root/scripts/remove-legacy-iwe.sh"
-"$root/scripts/remove-legacy-iwe.sh"
 "$venv_python" -c 'from hermes_retrieval.config import Settings; Settings.load().skill_intake_root.mkdir(parents=True, exist_ok=True)'
-"$venv_python" -m hermes_retrieval.cli session-close --harness hermes --all-profiles
-"$venv_python" -m hermes_retrieval.cli session-close --harness omp --all-profiles
-"$venv_python" -m hermes_retrieval.cli integrate
+"$root/integrate.sh"
 
 printf 'Retrieval is ready in %s\n' "$root"
 printf 'Review .env and sources.toml, then run: %s/start.sh\n' "$root"

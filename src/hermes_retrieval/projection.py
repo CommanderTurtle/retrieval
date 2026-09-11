@@ -774,7 +774,8 @@ def _configure_hermes_home(
     if not isinstance(external, list):
         raise RuntimeError(f"Hermes skills.external_dirs must be a list: {config_path}")
     previous_external = list(external)
-    external[:] = [projection_root]
+    external[:] = [value for value in external if str(value) != projection_root]
+    external.append(projection_root)
 
     servers = config.setdefault("mcp_servers", {})
     if not isinstance(servers, dict):
@@ -871,7 +872,8 @@ def _configure_omp_home(
     if not isinstance(custom, list):
         raise RuntimeError(f"OMP skills.customDirectories must be a list: {config_path}")
     previous_custom = list(custom)
-    custom[:] = [projection_root]
+    custom[:] = [value for value in custom if str(value) != projection_root]
+    custom.append(projection_root)
     config_changed = previous_custom != custom
     if config_changed:
         _run_harness_command(

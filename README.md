@@ -98,6 +98,18 @@ Update with:
 ~/Hermes/retrieval/update.sh
 ```
 
+Reapply only the installed harness contract, or audit it without changing
+anything:
+
+```bash
+~/Hermes/retrieval/integrate.sh
+~/Hermes/retrieval/doctor.sh
+```
+
+The doctor reads every ordinary and isolated Hermes/OMP profile and verifies
+the Retrieval MCP, projection lane, routing skill, and session-close lifecycle
+boundary. It does not start an MCP server, call a model, or access the network.
+
 The update is fast-forward-only through Git, syncs the locked uv environment,
 reconciles every existing profile, and reapplies integrations. It is safe to run
 repeatedly.
