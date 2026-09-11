@@ -522,6 +522,101 @@ def _run_harness_command(
         )
 
 
+def _hermes_python(settings: Settings) -> Path:
+    command = shlex.split(settings.hermes_command)
+    if not command:
+        raise RuntimeError("Hermes command is empty")
+    launcher_name = shutil.which(command[0]) or command[0]
+    launcher = Path(launcher_name).expanduser().resolve(strict=False)
+    if not launcher.is_file():
+        raise RuntimeError(f"Hermes launcher was not found: {launcher}")
+    first_line = launcher.read_text(encoding="utf-8").splitlines()[0]
+    if not first_line.startswith("#!"):
+        raise RuntimeError(f"Hermes launcher has no interpreter shebang: {launcher}")
+    # Keep the venv-facing interpreter path from the launcher. Resolving the
+    # python3 symlink to the host interpreter drops the venv's site-packages.
+    interpreter = Path(first_line[2:].strip()).expanduser()
+    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+        raise RuntimeError(f"Hermes Python runtime was not found: {interpreter}")
+    return interpreter
+
+
+def _hook_approval_present(home: Path, event: str, command: str) -> bool:
+    allowlist = home / "shell-hooks-allowlist.json"
+    if not allowlist.is_file():
+        return False
+    try:
+        payload = json.loads(allowlist.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Hermes hook allowlist is invalid: {allowlist}: {exc}") from exc
+    approvals = payload.get("approvals") if isinstance(payload, dict) else None
+    if approvals is None:
+        return False
+    if not isinstance(approvals, list):
+        raise RuntimeError(f"Hermes hook approvals must be a sequence: {allowlist}")
+    return any(
+        isinstance(row, dict)
+        and row.get("event") == event
+        and row.get("command") == command
+        for row in approvals
+    )
+
+
+def _approve_owned_hermes_hook(
+    settings: Settings,
+    home: Path,
+    event: str,
+    command: str,
+) -> bool:
+    """Refresh consent for Retrieval's exact hook without blanket auto-approval."""
+
+    code = "\n".join(
+        (
+            "import sys",
+            "from agent import shell_hooks",
+            "event, command = sys.argv[1:3]",
+            "entry = shell_hooks.allowlist_entry_for(event, command)",
+            "mtime = shell_hooks.script_mtime_iso(command)",
+            "changed = entry is None or entry.get('script_mtime_at_approval') != mtime",
+            "if changed:",
+            "    shell_hooks._record_approval(event, command)",
+            "print('changed' if changed else 'unchanged')",
+        )
+    )
+    result = subprocess.run(
+        [str(_hermes_python(settings)), "-c", code, event, command],
+        cwd=str(settings.root),
+        env={**os.environ, "HERMES_HOME": str(home)},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()[-2000:]
+        raise RuntimeError(
+            f"Hermes could not approve Retrieval's exact hook for {home}: {detail}"
+        )
+    return result.stdout.strip() == "changed"
+
+
+def _revoke_owned_hermes_hook(
+    settings: Settings,
+    home: Path,
+    event: str,
+    command: str,
+) -> bool:
+    if not _hook_approval_present(home, event, command):
+        return False
+    _run_harness_command(
+        settings.hermes_command,
+        ["hooks", "revoke", command],
+        environment={"HERMES_HOME": str(home)},
+    )
+    return True
+
+
 def _all_hermes_profile_homes(settings: Settings) -> list[Path]:
     homes = [settings.hermes_config.parent]
     profiles = settings.hermes_config.parent / "profiles"
@@ -695,6 +790,8 @@ def _install_lifecycle_integrations(
     changed = False
     hermes_installed: list[str] = []
     hermes_removed: list[str] = []
+    hermes_consented: list[str] = []
+    hermes_consent_removed: list[str] = []
     command = f"{hook_script} hermes"
     desired_hermes = {home.resolve(strict=False) for home in hermes_homes}
     for home in _all_hermes_profile_homes(settings):
@@ -729,8 +826,24 @@ def _install_lifecycle_integrations(
             changed = True
         if managed:
             hermes_installed.append(str(config_path))
+            if _approve_owned_hermes_hook(
+                settings,
+                home,
+                "on_session_end",
+                command,
+            ):
+                changed = True
+            hermes_consented.append(str(home / "shell-hooks-allowlist.json"))
         elif len(filtered) != len(rows):
             hermes_removed.append(str(config_path))
+        if not managed and _revoke_owned_hermes_hook(
+            settings,
+            home,
+            "on_session_end",
+            command,
+        ):
+            changed = True
+            hermes_consent_removed.append(str(home / "shell-hooks-allowlist.json"))
 
     omp_installed: list[str] = []
     omp_removed: list[str] = []
@@ -752,6 +865,8 @@ def _install_lifecycle_integrations(
     return {
         "hermes_hooks": hermes_installed,
         "hermes_hooks_removed_from_isolated_profiles": hermes_removed,
+        "hermes_hook_consents": hermes_consented,
+        "hermes_hook_consents_removed_from_isolated_profiles": hermes_consent_removed,
         "omp_extensions": omp_installed,
         "omp_extensions_removed_from_isolated_profiles": omp_removed,
         "worker": str(hook_script),

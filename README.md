@@ -108,7 +108,9 @@ anything:
 
 The doctor reads every ordinary and isolated Hermes/OMP profile and verifies
 the Retrieval MCP, projection lane, routing skill, and session-close lifecycle
-boundary. It does not start an MCP server, call a model, or access the network.
+boundary. For Hermes it also checks the native MCP, tool, and hook registries,
+plus the exact hook consent and current worker mtime. It does not start an MCP
+server, call a model, or access the network.
 
 The update is fast-forward-only through Git, syncs the locked uv environment,
 reconciles every existing profile, and reapplies integrations. It is safe to run
@@ -126,7 +128,11 @@ Retrieval uses harness-owned configuration surfaces wherever they exist:
 - Hermes MCP and skill-directory settings are written through
   `hermes config set`.
 - The Hermes lifecycle entry is written through `hermes config set` and is
-  visible through `hermes hooks list`.
+  visible through `hermes hooks list`. Hermes has no targeted hook-approval
+  command, so Retrieval calls Hermes's installed consent implementation for
+  only its exact session-close command. It never enables blanket hook consent;
+  isolated profiles revoke an obsolete owned approval through
+  `hermes hooks revoke`.
 - OMP skill-directory settings are written through `omp config set`.
 - OMP MCP configuration uses its documented `~/.omp/agent/mcp.json` surface;
   OMP has an interactive `/mcp` command but no equivalent non-interactive CLI

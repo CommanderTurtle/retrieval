@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
+import re
+import shlex
+import subprocess
 from typing import Any
 
 from .config import Settings
@@ -69,6 +75,7 @@ def audit_harnesses(settings: Settings) -> dict[str, Any]:
         hooks = payload.get("hooks")
         session_end = hooks.get("on_session_end") if isinstance(hooks, dict) else []
         router = home / "skills" / "research" / "retrieve-knowledge"
+        native = _native_hermes_state(settings, home, desired_hook["command"])
 
         if managed:
             valid_server = isinstance(server, dict) and (
@@ -91,6 +98,26 @@ def audit_harnesses(settings: Settings) -> dict[str, Any]:
                 isinstance(session_end, list) and desired_hook in session_end,
                 str(home / "config.yaml"),
             )
+            check(
+                scope,
+                "native registries",
+                native["ok"]
+                and native["mcp_enabled"]
+                and native["tools_enabled"]
+                and native["hook_allowed"],
+                native["detail"],
+            )
+            check(
+                scope,
+                "hook consent",
+                _hook_consent_current(
+                    home,
+                    "on_session_end",
+                    desired_hook["command"],
+                    hook,
+                ),
+                str(home / "shell-hooks-allowlist.json"),
+            )
             _check_router(check, scope, skill_source, router, skill_files)
         else:
             check(scope, "isolated MCP boundary", "retrieval" not in servers, str(home))
@@ -110,6 +137,25 @@ def audit_harnesses(settings: Settings) -> dict[str, Any]:
                     for row in session_end
                 ),
                 str(home),
+            )
+            check(
+                scope,
+                "isolated native registry boundary",
+                native["ok"]
+                and not native["mcp_present"]
+                and not native["tools_present"]
+                and not native["hook_present"],
+                native["detail"],
+            )
+            check(
+                scope,
+                "isolated hook consent boundary",
+                not _hook_consent_present(
+                    home,
+                    "on_session_end",
+                    desired_hook["command"],
+                ),
+                str(home / "shell-hooks-allowlist.json"),
             )
             check(scope, "isolated router boundary", not router.exists(), str(router))
 
@@ -219,3 +265,118 @@ def _profile_name(home: Path, default: Path) -> str:
     if home.resolve(strict=False) == default.resolve(strict=False):
         return "default"
     return home.parent.name if home.name == "agent" else home.name
+
+
+def _native_hermes_state(
+    settings: Settings,
+    home: Path,
+    hook_command: str,
+) -> dict[str, Any]:
+    executable = shlex.split(settings.hermes_command)
+    outputs: dict[str, str] = {}
+    failures: list[str] = []
+    for name, arguments in (
+        ("mcp", ["mcp", "list"]),
+        ("tools", ["tools", "list"]),
+        ("hooks", ["hooks", "list"]),
+    ):
+        try:
+            result = subprocess.run(
+                [*executable, *arguments],
+                cwd=str(settings.root),
+                env={**os.environ, "HERMES_HOME": str(home)},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            outputs[name] = ""
+            failures.append(f"{name}: {exc}")
+            continue
+        outputs[name] = f"{result.stdout}\n{result.stderr}"
+        if result.returncode:
+            failures.append(f"{name}: exit {result.returncode}")
+
+    mcp_present = bool(re.search(r"(?m)^\s*retrieval\s+", outputs.get("mcp", "")))
+    mcp_enabled = bool(
+        re.search(
+            r"(?m)^\s*retrieval\s+.*\u2713\s+enabled\s*$",
+            outputs.get("mcp", ""),
+        )
+    )
+    tools_present = bool(
+        re.search(r"(?m)^\s*retrieval\s+", outputs.get("tools", ""))
+    )
+    tools_enabled = bool(
+        re.search(
+            r"(?m)^\s*retrieval\s+all tools enabled\s*$",
+            outputs.get("tools", ""),
+        )
+    )
+    hook_lines = [
+        line
+        for line in outputs.get("hooks", "").splitlines()
+        if hook_command in line
+    ]
+    return {
+        "ok": not failures,
+        "mcp_present": mcp_present,
+        "mcp_enabled": mcp_enabled,
+        "tools_present": tools_present,
+        "tools_enabled": tools_enabled,
+        "hook_present": len(hook_lines) == 1,
+        "hook_allowed": len(hook_lines) == 1 and "\u2713 allowed" in hook_lines[0],
+        "detail": "; ".join(failures) or "hermes mcp/tools/hooks list",
+    }
+
+
+def _hook_consent_entry(
+    home: Path,
+    event: str,
+    command: str,
+) -> dict[str, Any] | None:
+    path = home / "shell-hooks-allowlist.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    approvals = payload.get("approvals") if isinstance(payload, dict) else None
+    if not isinstance(approvals, list):
+        return None
+    for entry in approvals:
+        if (
+            isinstance(entry, dict)
+            and entry.get("event") == event
+            and entry.get("command") == command
+        ):
+            return entry
+    return None
+
+
+def _hook_consent_present(home: Path, event: str, command: str) -> bool:
+    return _hook_consent_entry(home, event, command) is not None
+
+
+def _hook_consent_current(
+    home: Path,
+    event: str,
+    command: str,
+    executable: Path,
+) -> bool:
+    entry = _hook_consent_entry(home, event, command)
+    approved = entry.get("script_mtime_at_approval") if entry else None
+    if not isinstance(approved, str) or not executable.is_file():
+        return False
+    try:
+        approved_at = datetime.fromisoformat(approved.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if approved_at.tzinfo is None:
+        approved_at = approved_at.replace(tzinfo=timezone.utc)
+    approved_milliseconds = int(approved_at.timestamp() * 1000)
+    current_milliseconds = int(executable.stat().st_mtime * 1000)
+    return approved_milliseconds == current_milliseconds
