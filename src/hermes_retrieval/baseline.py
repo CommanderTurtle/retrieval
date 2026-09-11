@@ -21,8 +21,19 @@ from .projection import SkillProjection
 
 
 _MARKER = ".retrieval-intake.json"
-_ROUTER_NAME = "retrieve-knowledge"
 _IGNORED = {".git", "__pycache__", "node_modules", ".venv"}
+_ROUTER_PATHS = {
+    "hermes": (
+        Path("research/retrieve-knowledge"),
+        Path("web/localflame"),
+        Path("research/librarian"),
+    ),
+    "omp": (
+        Path("retrieve-knowledge"),
+        Path("localflame"),
+        Path("librarian"),
+    ),
+}
 
 
 def _slug(value: str) -> str:
@@ -102,10 +113,9 @@ class BaselineManager:
             if self.harness == "hermes"
             else None
         )
-        self.router = (
-            self.skills_root / "research" / _ROUTER_NAME
-            if self.harness == "hermes"
-            else self.skills_root / _ROUTER_NAME
+        self.routers = tuple(
+            self.skills_root / relative
+            for relative in _ROUTER_PATHS[self.harness]
         )
         self.intake = settings.skill_intake_root
 
@@ -218,7 +228,9 @@ class BaselineManager:
 
             self.skills_root.mkdir(parents=True, exist_ok=True)
             for package in _skill_packages(self.skills_root):
-                if package.resolve() == self.router.resolve(strict=False):
+                if package.resolve() in {
+                    router.resolve(strict=False) for router in self.routers
+                }:
                     continue
                 relative = package.relative_to(self.skills_root)
                 stock = self.stock_root / relative if self.stock_root else None
@@ -271,6 +283,7 @@ class BaselineManager:
                 "consolidated": consolidated,
                 "removed": removed,
                 "restored_stock": restored,
+                "preserved_routers": [str(path) for path in self.routers if path.is_dir()],
                 "skipped": skipped,
                 "projections": projections,
                 "indexed_before_clear": indexed_before_clear,

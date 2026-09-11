@@ -2,8 +2,10 @@
 
 Retrieval keeps large skill libraries searchable without advertising every
 skill in every model prompt. Hermes and OMP retain their upstream skill sets
-plus one small `retrieve-knowledge` routing skill. A request to that skill can
-find, select, and return one complete dormant `SKILL.md` in the same turn.
+plus a small first-party routing set. Retrieval installs `retrieve-knowledge`;
+the Localflame and Librarian installers own their corresponding routers. A
+request to `retrieve-knowledge` can find, select, and return one complete
+dormant `SKILL.md` in the same turn.
 
 The repository owns the complete path:
 
@@ -61,9 +63,12 @@ Hermes uses its native `on_session_end` shell-hook contract. OMP uses its native
 lock-protected local worker and return immediately, so closing or replacing a
 session does not stall the UI.
 
-After setup, the only non-upstream skill visible by default is
-`retrieve-knowledge`. The empty projection lane remains configured so a chosen
-package can become visible after `/reload-skills` in Hermes or `/reload` in OMP.
+After setup, the only non-upstream skills retained by session-close are the
+exact managed routers `retrieve-knowledge`, `localflame`, and `librarian` when
+their owning integrations are installed. The empty projection lane remains
+configured so a chosen package can become visible after `/reload-skills` in
+Hermes or `/reload` in OMP. No generic frontmatter or directory exemption is
+used; only those exact harness-relative paths bypass consolidation.
 
 ## Install and update
 
