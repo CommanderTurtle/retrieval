@@ -189,8 +189,12 @@ class RetrievalService:
         result["watcher"] = watcher
         result["catalog"] = self.catalog.stats()
         result["projections"] = {
-            harness: SkillProjection(self.settings, harness).list()
-            for harness in ("hermes", "omp")
+            "hermes": SkillProjection(self.settings, "hermes").list(),
+            "omp": {
+                "harness": "omp",
+                "delivery": "current-turn-only",
+                "skills": [],
+            },
         }
         result["target_harness"] = self.settings.target_harness
         return result
@@ -447,12 +451,15 @@ class RetrievalService:
         )
         deduped = []
         seen_paths: set[str] = set()
+        seen_names: set[str] = set()
         peak = float(rows[0]["rank_score"]) if rows else 1.0
         for row in rows:
             canonical = str(Path(row["path"]).resolve(strict=False))
-            if canonical in seen_paths:
+            name = str(row["name"]).strip().casefold()
+            if canonical in seen_paths or name in seen_names:
                 continue
             seen_paths.add(canonical)
+            seen_names.add(name)
             row["score"] = round(float(row.pop("rank_score")) / peak, 6)
             deduped.append(row)
             if len(deduped) >= limit:
@@ -488,7 +495,7 @@ class RetrievalService:
         }
 
     def retrieve_skill(self, query: str) -> dict[str, Any]:
-        """Delegate selection, return exact instructions, and project the package."""
+        """Delegate selection and return exact instructions to the caller."""
 
         selection = self.scout.select(
             query,
@@ -523,16 +530,13 @@ class RetrievalService:
             effective_state == "hidden"
             and self.settings.target_harness in hidden_harnesses
         )
+        inline_only = self.settings.target_harness == "omp"
         projection = (
             None
-            if already_installed
+            if already_installed or inline_only
             else self.projections.project({**entry, "state": effective_state})
         )
-        reload_command = (
-            "/reload-skills"
-            if self.settings.target_harness == "hermes"
-            else "/reload"
-        )
+        reload_command = "/reload-skills" if not inline_only else None
         return {
             "query": query,
             "harness": self.settings.target_harness,
@@ -554,7 +558,9 @@ class RetrievalService:
             "activation": {
                 "current_turn": "active-from-verbatim-tool-result",
                 "persisted": (
-                    "native-hidden-skill"
+                    "none"
+                    if inline_only
+                    else "native-hidden-skill"
                     if already_installed
                     else "harness-projection"
                 ),
@@ -562,6 +568,11 @@ class RetrievalService:
                 "reload_executed": False,
             },
             "instruction": (
+                "Use the returned SKILL.md immediately in this OMP turn. Retrieval "
+                "did not install, copy, or project the package, and no reload is "
+                "needed."
+                if inline_only
+                else
                 "Use the returned SKILL.md immediately. It is already installed in "
                 f"{self.settings.target_harness} but intentionally hidden from native "
                 "prompt metadata. No duplicate was created."
@@ -652,7 +663,7 @@ class RetrievalService:
         result = self.search_skills(query, limit)
         result["instruction"] = (
             "Compatibility search only. MCP callers should use retrieve_skill, which "
-            "delegates selection and projects one complete skill safely."
+            "delegates selection and returns one complete skill safely."
         )
         return result
 

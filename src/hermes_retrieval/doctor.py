@@ -21,7 +21,7 @@ from .projection import (
 
 
 def audit_harnesses(settings: Settings) -> dict[str, Any]:
-    """Read the installed Hermes/OMP projection contract without changing it."""
+    """Read the installed Hermes projection and OMP inline contract."""
 
     checks: list[dict[str, Any]] = []
 
@@ -39,7 +39,6 @@ def audit_harnesses(settings: Settings) -> dict[str, Any]:
     python = root / ".venv" / "bin" / "python"
     start = root / "start.sh"
     hook = root / "hooks" / "session-close.sh"
-    omp_extension = root / "integrations" / "omp" / "retrieval-session-close.ts"
     skill_source = root / "skills" / "retrieve-knowledge"
     skill_files = (Path("SKILL.md"), Path("agents") / "openai.yaml")
 
@@ -47,7 +46,6 @@ def audit_harnesses(settings: Settings) -> dict[str, Any]:
         (python, "virtual-environment Python"),
         (start, "MCP launcher"),
         (hook, "Hermes session-close worker"),
-        (omp_extension, "OMP session-close extension"),
         (skill_source / skill_files[0], "routing skill"),
         (skill_source / skill_files[1], "routing metadata"),
     ):
@@ -172,10 +170,12 @@ def audit_harnesses(settings: Settings) -> dict[str, Any]:
     )
     if (scout / "config.yml").is_file() and scout not in omp_homes:
         omp_homes.append(scout)
-    desired_extension = (
-        omp_extension.read_text(encoding="utf-8")
-        if omp_extension.is_file()
-        else None
+    omp_projection_path = Path(omp_projection)
+    check(
+        "omp",
+        "no package projection storage",
+        not omp_projection_path.exists() or not any(omp_projection_path.iterdir()),
+        omp_projection,
     )
     for home in omp_homes:
         scope = f"omp:{_profile_name(home, settings.omp_config.parent)}"
@@ -198,20 +198,19 @@ def audit_harnesses(settings: Settings) -> dict[str, Any]:
                 and server.get("cwd") == str(root)
                 and isinstance(server.get("env"), dict)
                 and server["env"].get("RETRIEVAL_HARNESS") == "omp"
+                and server["env"].get("RETRIEVAL_DELIVERY") == "inline"
             )
             check(scope, "MCP", valid_server, str(mcp_path))
             check(
                 scope,
-                "projection lane",
-                isinstance(custom, list) and omp_projection in custom,
+                "turn-local delivery",
+                not isinstance(custom, list) or omp_projection not in custom,
                 omp_projection,
             )
             check(
                 scope,
-                "session-close extension",
-                desired_extension is not None
-                and extension.is_file()
-                and extension.read_text(encoding="utf-8") == desired_extension,
+                "no session-close extension",
+                not extension.exists(),
                 str(extension),
             )
             _check_router(check, scope, skill_source, router, skill_files)

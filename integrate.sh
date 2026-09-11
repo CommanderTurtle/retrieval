@@ -12,7 +12,6 @@ python="$root/.venv/bin/python"
 chmod +x -- "$root/hooks/session-close.sh" "$root/scripts/remove-legacy-iwe.sh"
 "$root/scripts/remove-legacy-iwe.sh"
 "$python" -m hermes_retrieval.cli session-close --harness hermes --all-profiles
-"$python" -m hermes_retrieval.cli session-close --harness omp --all-profiles
 "$python" -m hermes_retrieval.cli integrate
 "$python" -m hermes_retrieval.cli doctor
 

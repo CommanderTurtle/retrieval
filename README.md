@@ -13,8 +13,9 @@ The repository owns the complete path:
 - in-process BM25, fuzzy matching, reciprocal-rank fusion, and graph traversal;
 - optional Chroma/FastEmbed semantic ranking;
 - a read-only OMP selector with no ordinary tools or inherited MCP servers;
-- manifest-owned temporary package projections for Hermes and OMP;
-- session-close indexing, consolidation, and projection cleanup;
+- manifest-owned temporary package projections for Hermes;
+- current-turn-only OMP delivery with no retrieved package writes;
+- Hermes session-close indexing, consolidation, and projection cleanup;
 - a structured catalog tree for Diogenes;
 - MCP tools and a small administrative CLI.
 
@@ -30,8 +31,8 @@ surface is documented in [NOTICE.md](NOTICE.md).
 3. An isolated OMP session may inspect only candidate metadata and bounded
    catalog context. It cannot use shell, filesystem, web, skills, rules, or MCP.
 4. Retrieval validates the selected ID and reads the canonical package.
-5. It returns the complete `SKILL.md` and copies the complete package to the
-   requesting harness's temporary projection lane.
+5. It returns the complete `SKILL.md`. Hermes also receives a temporary
+   manifest-owned package copy; OMP receives no filesystem copy.
 6. The calling model applies the instructions immediately in that turn.
 
 The model does not need to browse a skill list first. The native routing skill
@@ -57,18 +58,19 @@ Skills with the same name but different bytes remain distinct. Packages that
 contain symlinks are indexed and reported but not removed automatically. The
 source of a configured external directory is never deleted.
 
-Hermes uses its native `on_session_end` shell-hook contract. OMP uses its native
-`session_before_switch` and `session_shutdown` extension events, covering
-`/new`, `/resume`, `/fork`, and process exit. Both dispatch the same
-lock-protected local worker and return immediately, so closing or replacing a
-session does not stall the UI.
+Hermes uses its native `on_session_end` shell-hook contract. The hook dispatches
+the lock-protected local worker and returns immediately, so closing or replacing
+a session does not stall the UI. OMP has no Retrieval shutdown extension:
+retrieved instructions exist in the requesting tool result only, its default
+skills remain untouched, and no later cleanup is necessary.
 
-After setup, the only non-upstream skills retained by session-close are the
-exact managed routers `retrieve-knowledge`, `localflame`, and `librarian` when
-their owning integrations are installed. The empty projection lane remains
-configured so a chosen package can become visible after `/reload-skills` in
-Hermes or `/reload` in OMP. No generic frontmatter or directory exemption is
-used; only those exact harness-relative paths bypass consolidation.
+After setup, the only non-upstream skills retained by Hermes session-close are
+the exact managed routers `retrieve-knowledge`, `localflame`, and `librarian`
+when their owning integrations are installed. Hermes keeps its projection lane
+configured so a chosen package can become visible after `/reload-skills`. OMP
+does not configure a projection lane. No generic frontmatter or directory
+exemption is used; only those exact harness-relative router paths bypass
+consolidation.
 
 ## Install and update
 
@@ -106,11 +108,12 @@ anything:
 ~/Hermes/retrieval/doctor.sh
 ```
 
-The doctor reads every ordinary and isolated Hermes/OMP profile and verifies
-the Retrieval MCP, projection lane, routing skill, and session-close lifecycle
-boundary. For Hermes it also checks the native MCP, tool, and hook registries,
-plus the exact hook consent and current worker mtime. It does not start an MCP
-server, call a model, or access the network.
+The doctor reads every ordinary and isolated Hermes/OMP profile. It verifies
+Hermes's MCP, projection lane, router, and session-close boundary, plus the
+native MCP/tool/hook registries and exact hook consent. For OMP it verifies the
+inline-delivery MCP marker, router, absence of a projection custom directory,
+and absence of the retired shutdown extension. It does not start an MCP server,
+call a model, or access the network.
 
 The update is fast-forward-only through Git, syncs the locked uv environment,
 reconciles every existing profile, and reapplies integrations. It is safe to run
@@ -133,17 +136,20 @@ Retrieval uses harness-owned configuration surfaces wherever they exist:
   only its exact session-close command. It never enables blanket hook consent;
   isolated profiles revoke an obsolete owned approval through
   `hermes hooks revoke`.
-- OMP skill-directory settings are written through `omp config set`.
+- A stale OMP projection directory is removed through `omp config set`; other
+  custom skill directories and OMP's default skills are preserved.
 - OMP MCP configuration uses its documented `~/.omp/agent/mcp.json` surface;
   OMP has an interactive `/mcp` command but no equivalent non-interactive CLI
   registration command.
-- The OMP shutdown extension is installed in its normal `extensions` directory.
+- The OMP MCP entry carries `RETRIEVAL_DELIVERY=inline`. No OMP shutdown
+  extension or retrieved skill package is installed.
 
 The installer covers the default home and profiles that already use the normal
 external-tool stack. Retrieval's own `retrieval-scout` OMP profile, empty audit
-profiles, and Librarian's private `librarian-okf` worker are excluded from MCP,
-router-skill, and shutdown integration. Re-running the installer also removes
-unchanged Retrieval-owned artifacts from a profile that later becomes isolated.
+profiles, and Librarian's private `librarian-okf` worker are excluded from MCP
+and router-skill integration. Re-running the installer also removes
+Retrieval-owned artifacts from a profile that later becomes isolated and
+retires projection/extension remnants from older OMP integrations.
 
 ## Source policy
 
@@ -164,7 +170,7 @@ to Hermes or OMP.
 
 Category assignments come from `taxonomy.toml`, reviewed frontmatter, or exact
 IDs in `category-overrides.toml`. Unclassified packages remain in the audit
-queue and are not projected until reviewed.
+queue and are not eligible for Hermes projection until reviewed.
 
 ## Search and graph
 
@@ -208,7 +214,6 @@ retrieval projected list --harness all
 retrieval projected clear --harness hermes --all
 
 retrieval session-close --harness hermes
-retrieval session-close --harness omp
 retrieval session-close --harness hermes --all-profiles
 
 retrieval references "architecture rationale"
@@ -225,7 +230,7 @@ The public server exposes only `retrieve_skill` and `retrieve_reference`.
 Search and bounded graph reads are private capabilities of the isolated
 selector; catalog browsing, workflow compatibility commands, projection
 inspection, and cleanup remain CLI operations. MCP tools cannot delete a
-canonical package or clear another harness's projection lane.
+canonical package or clear the Hermes projection lane.
 
 ## Diogenes
 
@@ -240,7 +245,8 @@ semantic lane. Lexical/fuzzy/graph search stays available in-process.
 ## Data and safety
 
 - Source packages and harness session stores remain authoritative.
-- Catalog cards, Chroma collections, and projections are disposable indexes.
+- Catalog cards, Chroma collections, and Hermes projections are disposable
+  indexes. OMP Retrieval results are not persisted.
 - Projection cleanup validates both an ownership manifest and per-directory
   markers.
 - Intake removal happens only after a copied package produces the same complete

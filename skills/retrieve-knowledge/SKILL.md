@@ -14,17 +14,16 @@ Read and apply the returned instructions immediately in the same turn. Do not
 ask the user to run another command, search the filesystem yourself, enumerate
 the library first, or narrate the lookup unless the tool reports an error.
 
-Retrieval knows whether this MCP process belongs to Hermes or OMP and writes
-only to that harness's temporary projection lane. The exact `SKILL.md` in the
-tool result is authoritative for the current turn. If later turns must discover
-the projected package through native skill discovery, refresh the host:
+Retrieval knows whether this MCP process belongs to Hermes or OMP. The exact
+`SKILL.md` in the tool result is authoritative for the current turn. Hermes
+may also receive a manifest-owned temporary package copy for native discovery;
+use `/reload-skills` only when a later Hermes turn needs that copy. OMP is
+strictly current-turn-only: no retrieved package is written into an OMP skill
+tree and no reload is needed.
 
-- Hermes: `/reload-skills`
-- OMP: `/reload`
-
-Session shutdown indexes newly installed skill packages, consolidates identical
-copies into Retrieval's durable library, and removes temporary projections.
-Do not maintain or delete projection directories yourself.
+Hermes session shutdown indexes newly installed skill packages, consolidates
+identical copies into Retrieval's durable library, and removes temporary
+Hermes projections. Do not maintain or delete projection directories yourself.
 
 Do not use Retrieval for source-code graphs, ordinary web research, or curated
 wiki synthesis. Use codebase-memory, Localflame, and Librarian for those jobs.

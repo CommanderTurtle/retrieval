@@ -105,7 +105,7 @@ def _parser() -> argparse.ArgumentParser:
     references.add_argument("--max-chars", type=int, default=8000)
     sub.add_parser(
         "integrate",
-        help="register isolated projection and MCP lanes with Hermes and OMP",
+        help="register Hermes projection and OMP current-turn MCP delivery",
     )
     doctor = sub.add_parser(
         "doctor",

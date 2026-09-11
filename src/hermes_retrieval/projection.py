@@ -131,6 +131,11 @@ class SkillProjection:
         return files, skipped, total
 
     def project(self, entry: dict[str, Any]) -> dict[str, Any]:
+        if self.harness == "omp":
+            raise ValueError(
+                "OMP Retrieval delivery is current-turn-only; package projection "
+                "is disabled"
+            )
         item_id = str(entry["item_id"])
         skill_path = Path(str(entry["canonical_path"])).resolve()
         if not skill_path.is_file() or skill_path.name != "SKILL.md":
@@ -783,9 +788,8 @@ def _install_lifecycle_integrations(
     omp_homes: list[Path],
 ) -> tuple[dict[str, Any], bool]:
     hook_script = settings.root / "hooks" / "session-close.sh"
-    omp_source = settings.root / "integrations" / "omp" / "retrieval-session-close.ts"
-    if not hook_script.is_file() or not omp_source.is_file():
-        raise RuntimeError("Retrieval session-close integrations are incomplete")
+    if not hook_script.is_file():
+        raise RuntimeError("Retrieval's Hermes session-close integration is incomplete")
 
     changed = False
     hermes_installed: list[str] = []
@@ -847,20 +851,15 @@ def _install_lifecycle_integrations(
 
     omp_installed: list[str] = []
     omp_removed: list[str] = []
-    extension_text = omp_source.read_text(encoding="utf-8")
-    desired_omp = {home.resolve(strict=False) for home in omp_homes}
+    # OMP receives retrieved instructions in the tool result only. Older
+    # versions installed a shutdown extension to clean package projections;
+    # the exact Retrieval-owned path is now retired from every OMP profile.
     for home in _all_omp_profile_homes(settings):
         target = home / "extensions" / "retrieval-session-close.ts"
-        if home.resolve(strict=False) not in desired_omp:
-            if target.is_file() and target.read_text(encoding="utf-8") == extension_text:
-                target.unlink()
-                changed = True
-                omp_removed.append(str(target))
-            continue
-        before = target.read_text(encoding="utf-8") if target.is_file() else None
-        _atomic_text(target, extension_text)
-        changed = changed or before != extension_text
-        omp_installed.append(str(target))
+        if target.is_file():
+            target.unlink()
+            changed = True
+            omp_removed.append(str(target))
 
     return {
         "hermes_hooks": hermes_installed,
@@ -980,20 +979,25 @@ def _configure_omp_home(
             "changed": False,
         }
     config = _load_yaml(config_path)
-    skills = config.setdefault("skills", {})
-    if not isinstance(skills, dict):
-        raise RuntimeError(f"OMP skills configuration must be a mapping: {config_path}")
-    custom = skills.setdefault("customDirectories", [])
-    if not isinstance(custom, list):
-        raise RuntimeError(f"OMP skills.customDirectories must be a list: {config_path}")
-    previous_custom = list(custom)
-    custom[:] = [value for value in custom if str(value) != projection_root]
-    custom.append(projection_root)
-    config_changed = previous_custom != custom
+    skills = config.get("skills")
+    custom = skills.get("customDirectories") if isinstance(skills, dict) else None
+    config_changed = False
+    if isinstance(custom, list):
+        desired_custom = [
+            value for value in custom if str(value) != projection_root
+        ]
+        config_changed = desired_custom != custom
+    else:
+        desired_custom = []
     if config_changed:
         _run_harness_command(
             settings.omp_command,
-            ["config", "set", "skills.customDirectories", json.dumps(custom)],
+            [
+                "config",
+                "set",
+                "skills.customDirectories",
+                json.dumps(desired_custom),
+            ],
             environment={"PI_CODING_AGENT_DIR": str(home)},
         )
 
@@ -1016,6 +1020,7 @@ def _configure_omp_home(
     if not isinstance(environment, dict):
         raise RuntimeError(f"OMP retrieval MCP env must be an object: {mcp_path}")
     environment["RETRIEVAL_HARNESS"] = "omp"
+    environment["RETRIEVAL_DELIVERY"] = "inline"
     mcp_changed = _write_json_if_changed(mcp_path, mcp)
     return {
         "config": str(config_path),
@@ -1063,14 +1068,14 @@ def _remove_retrieval_from_omp_home(
 
 
 def integrate_harnesses(settings: Settings) -> dict[str, Any]:
-    """Register isolated projection and MCP lanes for Hermes and OMP."""
+    """Register Hermes projection and OMP current-turn MCP delivery."""
 
     hermes_projection = SkillProjection(settings, "hermes")
     omp_projection = SkillProjection(settings, "omp")
     hermes_root = str(hermes_projection.root)
     omp_root = str(omp_projection.root)
     hermes_projection.root.mkdir(parents=True, exist_ok=True)
-    omp_projection.root.mkdir(parents=True, exist_ok=True)
+    omp_retirement = _retire_projection_lane(omp_projection)
 
     hermes_homes = _hermes_profile_homes(settings)
     hermes_profiles = [
@@ -1135,8 +1140,10 @@ def integrate_harnesses(settings: Settings) -> dict[str, Any]:
             "mcp_config": str(settings.omp_mcp_config),
             "available": settings.omp_config.is_file(),
             "changed": omp_changed,
-            "projection": omp_root,
-            "reload": "/reload",
+            "projection": None,
+            "delivery": "current-turn-only",
+            "retired_projection": omp_retirement,
+            "reload": None,
             "scout_profile": scout_profile,
             "profiles": omp_profiles,
             "isolated_profiles_cleaned": isolated_omp_profiles,
@@ -1149,4 +1156,37 @@ def integrate_harnesses(settings: Settings) -> dict[str, Any]:
             or skills_changed
             or lifecycle_changed
         ),
+    }
+
+
+def _retire_projection_lane(projection: SkillProjection) -> dict[str, Any]:
+    """Remove only manifest-owned packages from a retired projection lane."""
+
+    before = projection.list()
+    skill_ids = [
+        str(row["item_id"])
+        for row in before.get("skills", [])
+        if isinstance(row, dict) and row.get("item_id")
+    ]
+    if skill_ids:
+        projection.clear(skill_ids)
+
+    manifest_removed = False
+    root_removed = False
+    if projection.manifest_path.is_file():
+        projection.manifest_path.unlink()
+        manifest_removed = True
+    if projection.root.is_dir() and not any(projection.root.iterdir()):
+        projection.root.rmdir()
+        root_removed = True
+    retained = (
+        [str(path) for path in sorted(projection.root.iterdir())]
+        if projection.root.is_dir()
+        else []
+    )
+    return {
+        "removed_skills": skill_ids,
+        "manifest_removed": manifest_removed,
+        "root_removed": root_removed,
+        "retained_unowned": retained,
     }

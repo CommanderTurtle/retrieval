@@ -19,10 +19,11 @@ mcp = FastMCP(
     "Retrieval",
     instructions=(
         "Retrieve at most one specialist skill through an isolated read-only scout. "
-        "The exact SKILL.md is returned immediately and its complete package is copied "
-        "only into this MCP instance's Hermes or OMP projection lane. Optional reference "
-        "libraries are retrieved separately as bounded heading sections. Projection "
-        "inspection and cleanup are intentionally human-only CLI operations."
+        "The exact SKILL.md is returned immediately. Hermes may also receive a "
+        "manifest-owned temporary package projection; OMP delivery is current-turn-only "
+        "and writes no skill copy. Optional reference libraries are retrieved separately "
+        "as bounded heading sections. Projection inspection and cleanup are intentionally "
+        "human-only CLI operations."
     ),
 )
 
@@ -34,12 +35,13 @@ def _service() -> RetrievalService:
 
 @mcp.tool()
 def retrieve_skill(query: str) -> dict:
-    """Find, inspect, and temporarily project at most one relevant dormant skill.
+    """Find and inspect at most one relevant dormant skill.
 
     Selection runs in an ephemeral OMP RPC process with all native tools, skills,
     rules, and extensions disabled. It can call only Retrieval's read-only search
-    and graph-read tools. The selected SKILL.md is returned verbatim now; the
-    package projection persists for later compaction/reload.
+    and graph-read tools. The selected SKILL.md is returned verbatim now.
+    Hermes may retain a temporary package projection for later reload. OMP gets
+    the exact instructions in this tool result only.
     """
 
     return _service().retrieve_skill(query=query)

@@ -28,6 +28,52 @@ def test_hidden_skill_is_installed_only_in_its_own_harness() -> None:
     assert _skill_state_for_harness(entry, "omp") == "hidden"
 
 
+def test_omp_retrieval_returns_exact_skill_without_projecting(
+    tmp_path: Path,
+) -> None:
+    skill = tmp_path / "sample" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Sample\n\nUse this now.\n", encoding="utf-8")
+    entry = {
+        "item_id": "repo:sample",
+        "title": "Sample",
+        "description": "Sample instructions",
+        "source": "repo",
+        "state": "cold",
+        "categories": ["test"],
+        "canonical_path": str(skill),
+        "native_harnesses": [],
+        "hidden_harnesses": [],
+    }
+    projection_calls: list[dict] = []
+    service = object.__new__(RetrievalService)
+    service.settings = SimpleNamespace(target_harness="omp")
+    service.scout = SimpleNamespace(
+        select=lambda *_args, **_kwargs: {
+            "selected_id": "repo:sample",
+            "reason": "matches",
+        }
+    )
+    service.search_skills = lambda *_args, **_kwargs: {"matches": []}
+    service._scout_read = lambda *_args, **_kwargs: {}
+    service.catalog = SimpleNamespace(entry=lambda _skill_id: entry)
+    service.projections = SimpleNamespace(
+        project=lambda value: projection_calls.append(value)
+    )
+
+    result = service.retrieve_skill("sample instructions")
+
+    assert projection_calls == []
+    assert result["skill"]["content"] == "# Sample\n\nUse this now.\n"
+    assert result["projection"] is None
+    assert result["activation"] == {
+        "current_turn": "active-from-verbatim-tool-result",
+        "persisted": "none",
+        "reload_command": None,
+        "reload_executed": False,
+    }
+
+
 def test_find_skills_deduplicates_same_file_across_sources(tmp_path: Path) -> None:
     skill = tmp_path / "skills" / "sample" / "SKILL.md"
     skill.parent.mkdir(parents=True)
