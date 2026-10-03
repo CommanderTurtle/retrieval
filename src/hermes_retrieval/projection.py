@@ -527,23 +527,53 @@ def _run_harness_command(
         )
 
 
-def _hermes_python(settings: Settings) -> Path:
+_HERMES_AGENT_ROOT_PATTERN = re.compile(r"sys\.path\.insert\(0, ['\"]([^'\"]+)['\"]\)")
+_hermes_runtime_cache: dict[str, tuple[Path, Path]] = {}
+
+
+def _hermes_runtime(settings: Settings) -> tuple[Path, Path]:
+    """Resolve Hermes's published runtime as (interpreter, hermes-agent root).
+
+    Hermes prints its exact runtime on `hermes --print-runtime-command` as
+    [python, "-I", "-c", bootstrap]; the bootstrap inserts the hermes-agent
+    root at sys.path[0] and imports hermes_bootstrap, and replicating that is
+    the supported machine boundary. The launcher is only a /bin/sh wrapper
+    since the 2026-09-12 Hermes runtime refactor, so its first line names no
+    interpreter and must never be executed as one.
+    """
+    cached = _hermes_runtime_cache.get(settings.hermes_command)
+    if cached is not None:
+        return cached
     command = shlex.split(settings.hermes_command)
     if not command:
         raise RuntimeError("Hermes command is empty")
-    launcher_name = shutil.which(command[0]) or command[0]
-    launcher = Path(launcher_name).expanduser().resolve(strict=False)
-    if not launcher.is_file():
-        raise RuntimeError(f"Hermes launcher was not found: {launcher}")
-    first_line = launcher.read_text(encoding="utf-8").splitlines()[0]
-    if not first_line.startswith("#!"):
-        raise RuntimeError(f"Hermes launcher has no interpreter shebang: {launcher}")
-    # Keep the venv-facing interpreter path from the launcher. Resolving the
-    # python3 symlink to the host interpreter drops the venv's site-packages.
-    interpreter = Path(first_line[2:].strip()).expanduser()
-    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
-        raise RuntimeError(f"Hermes Python runtime was not found: {interpreter}")
-    return interpreter
+    printed = subprocess.run(
+        [*command, "--print-runtime-command"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+    try:
+        runtime = json.loads(printed.stdout)
+    except ValueError:
+        runtime = None
+    parts = runtime if isinstance(runtime, list) else []
+    interpreter = Path(str(parts[0])) if parts else Path()
+    agent_root_text = ""
+    for part in parts:
+        found = _HERMES_AGENT_ROOT_PATTERN.search(str(part))
+        if found:
+            agent_root_text = found.group(1)
+            break
+    agent_root = Path(agent_root_text)
+    if printed.returncode or not interpreter.is_file() or not agent_root.is_dir():
+        detail = (printed.stderr or printed.stdout).strip()[-2000:]
+        raise RuntimeError(f"Hermes did not print a usable runtime command: {detail}")
+    resolved = (interpreter, agent_root)
+    _hermes_runtime_cache[settings.hermes_command] = resolved
+    return resolved
 
 
 def _hook_approval_present(home: Path, event: str, command: str) -> bool:
@@ -575,9 +605,15 @@ def _approve_owned_hermes_hook(
 ) -> bool:
     """Refresh consent for Retrieval's exact hook without blanket auto-approval."""
 
+    interpreter, agent_root = _hermes_runtime(settings)
     code = "\n".join(
         (
-            "import sys",
+            "import os, sys",
+            "os.environ.pop('PYTHONHOME', None)",
+            "os.environ.pop('PYTHONPATH', None)",
+            "os.environ.pop('VIRTUAL_ENV', None)",
+            "sys.path.insert(0, os.environ['HERMES_AGENT_ROOT'])",
+            "import hermes_bootstrap",
             "from agent import shell_hooks",
             "event, command = sys.argv[1:3]",
             "entry = shell_hooks.allowlist_entry_for(event, command)",
@@ -589,9 +625,13 @@ def _approve_owned_hermes_hook(
         )
     )
     result = subprocess.run(
-        [str(_hermes_python(settings)), "-c", code, event, command],
+        [str(interpreter), "-I", "-c", code, event, command],
         cwd=str(settings.root),
-        env={**os.environ, "HERMES_HOME": str(home)},
+        env={
+            **os.environ,
+            "HERMES_HOME": str(home),
+            "HERMES_AGENT_ROOT": str(agent_root),
+        },
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
